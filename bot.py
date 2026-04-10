@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -11,18 +11,14 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile
 from supabase import create_client, Client
 from openpyxl import Workbook
+import aiohttp
+from aiohttp import web
 
-# === Конфигурация (всё из переменных окружения) ===
+# === Конфигурация (из переменных окружения) ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", 6810564564))
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
-# === Проверка, что все переменные заданы ===
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable not set")
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -65,7 +61,7 @@ class DeleteTrackForm(StatesGroup):
 class CurrencyForm(StatesGroup):
     waiting_for_amount = State()
 
-# === Supabase функции (московское время) ===
+# === Функции Supabase (московское время) ===
 def get_msk_time():
     return datetime.now(timezone.utc) + timedelta(hours=3)
 
@@ -108,7 +104,6 @@ def get_total_sum(user_id):
 
 # === Конвертер валют ===
 async def get_exchange_rates():
-    import aiohttp
     apis = [
         "https://api.exchangerate.host/latest?base=USD",
         "https://api.exchangerate-api.com/v4/latest/USD"
@@ -400,9 +395,45 @@ async def process_delete_track(message: types.Message, state: FSMContext):
         await message.answer("Введи правильный номер!", reply_markup=cancel_keyboard)
     await state.clear()
 
+# === Веб-сервер для Render (обязательно) ===
+async def handle_web(request):
+    return web.Response(text="Bot is running", status=200)
+
+async def start_web():
+    port = int(os.environ.get("PORT", 8000))
+    app = web.Application()
+    app.router.add_get("/", handle_web)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Веб-сервер запущен на порту {port}")
+
+# === Самопинг ===
+async def keep_alive():
+    url = "https://track-bot-fresh.onrender.com"  # ЗДЕСЬ ВАШ URL
+    while True:
+        await asyncio.sleep(600)  # 10 минут
+        try:
+            async with aiohttp.ClientSession() as session:
+                await session.get(url, timeout=5)
+                print("Keep-alive ping sent")
+        except Exception as e:
+            print(f"Keep-alive error: {e}")
+
+async def run_bot():
+    while True:
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            print("Вебхук сброшен, запускаем polling...")
+            await dp.start_polling(bot)
+        except Exception as e:
+            print(f"Бот упал с ошибкой: {e}. Перезапуск через 5 секунд...")
+            await asyncio.sleep(5)
+
 async def main():
     print("Бот запущен...")
-    await dp.start_polling(bot)
+    await asyncio.gather(keep_alive(), run_bot(), start_web())
 
 if __name__ == "__main__":
     asyncio.run(main())
