@@ -1,0 +1,4 @@
+aiogram
+supabase
+openpyxl
+aiohttp
