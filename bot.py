@@ -12,15 +12,16 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 from supabase import create_client, Client
 from openpyxl import Workbook
 import aiohttp
+from aiohttp import web
 
-# === Конфигурация ===
+# === Конфигурация из переменных окружения ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", 6810564564))
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Тарифы для калькулятора (из переменных окружения)
-CARGO_RATE = float(os.getenv("CARGO_RATE", 3.5))
+# Тарифы для калькулятора
+CARGO_RATE = float(os.getenv("CARGO_RATE", 12.0))
 DELIVERY_MOSCOW_MINSK = float(os.getenv("DELIVERY_MOSCOW_MINSK", 1.6))
 DELIVERY_MINSK_LIDA = float(os.getenv("DELIVERY_MINSK_LIDA", 0.8))
 TRANSFER_FEE = float(os.getenv("TRANSFER_FEE", 10.0))
@@ -345,7 +346,6 @@ async def calc_result(message: types.Message, state: FSMContext):
         return
     data = await state.get_data()
     city = data.get("city")
-    # Используем тарифы из переменных окружения
     cost = weight * CARGO_RATE
     cost += weight * DELIVERY_MOSCOW_MINSK
     if city == "Лида":
@@ -380,13 +380,11 @@ async def broadcast_cmd(message: types.Message):
     try:
         start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
         end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
-        # Устанавливаем время на начало и конец дня в московском часовом поясе
         start_datetime = start_date.replace(tzinfo=timezone(timedelta(hours=3)))
         end_datetime = end_date.replace(hour=23, minute=59, second=59, tzinfo=timezone(timedelta(hours=3)))
     except:
         await message.answer("❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД")
         return
-    # Преобразуем в isoformat для сравнения с created_at (который хранится в MSK)
     res = supabase.table("tracks").select("user_id").gte("created_at", start_datetime.isoformat()).lte("created_at", end_datetime.isoformat()).execute()
     user_ids = list(set(t["user_id"] for t in res.data))
     if not user_ids:
@@ -501,9 +499,21 @@ async def process_delete_track(message: types.Message, state: FSMContext):
         await message.answer("Введи правильный номер!", reply_markup=cancel_keyboard)
     await state.clear()
 
-# === Самопинг и автоматический перезапуск ===
+# === Веб-сервер и самопинг ===
+async def handle_web(request):
+    return web.Response(text="Bot is running")
+
+async def start_web():
+    app = web.Application()
+    app.router.add_get("/", handle_web)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 8000)
+    await site.start()
+    print("Веб-сервер запущен на порту 8000")
+
 async def keep_alive():
-    url = "https://track-bot-fresh.onrender.com"
+    url = os.getenv("RENDER_EXTERNAL_URL", "https://track-bot-stable.onrender.com")  # замените после деплоя
     while True:
         await asyncio.sleep(600)
         try:
@@ -525,7 +535,7 @@ async def run_bot():
 
 async def main():
     print("Бот запущен...")
-    await asyncio.gather(keep_alive(), run_bot())
+    await asyncio.gather(keep_alive(), run_bot(), start_web())
 
 if __name__ == "__main__":
     asyncio.run(main())
