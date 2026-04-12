@@ -13,19 +13,11 @@ from supabase import create_client, Client
 from openpyxl import Workbook
 import aiohttp
 
-# === Конфигурация из переменных окружения ===
+# === Конфигурация ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", 6810564564))
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
-# Тарифы для калькулятора (из переменных окружения)
-CARGO_RATE = float(os.getenv("CARGO_RATE", 3.5))
-DELIVERY_MOSCOW_MINSK = float(os.getenv("DELIVERY_MOSCOW_MINSK", 1.6))
-DELIVERY_MINSK_LIDA = float(os.getenv("DELIVERY_MINSK_LIDA", 0.8))
-TRANSFER_FEE = float(os.getenv("TRANSFER_FEE", 10.0))
-EXTRA_RATE = float(os.getenv("EXTRA_RATE", 0.0))
-FIXED_COST = float(os.getenv("FIXED_COST", 0.0))
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -38,7 +30,7 @@ main_keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="Новый трек")],
         [KeyboardButton(text="Мои треки"), KeyboardButton(text="Редактировать профиль")],
         [KeyboardButton(text="Удалить трек"), KeyboardButton(text="📊 Выгрузить Excel")],
-        [KeyboardButton(text="💱 Конвертер валют"), KeyboardButton(text="Калькулятор доставки")]
+        [KeyboardButton(text="💱 Конвертер валют"), KeyboardButton(text="📦 Калькулятор доставки")]
     ],
     resize_keyboard=True
 )
@@ -72,7 +64,7 @@ class CalcForm(StatesGroup):
     waiting_for_city = State()
     waiting_for_weight = State()
 
-# === Supabase функции (московское время) ===
+# === Supabase функции ===
 def get_msk_time():
     return datetime.now(timezone.utc) + timedelta(hours=3)
 
@@ -308,7 +300,7 @@ async def export_to_excel(message: types.Message):
         caption=f"📊 Ваши треки в Excel\nФИО: {full_name}\nТелефон: {phone}"
     )
 
-@dp.message(F.text == "Калькулятор доставки")
+@dp.message(F.text == "📦 Калькулятор доставки")
 async def calc_city(message: types.Message, state: FSMContext):
     keyboard = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="Минск"), KeyboardButton(text="Лида")]],
@@ -336,27 +328,34 @@ async def calc_result(message: types.Message, state: FSMContext):
         return
     data = await state.get_data()
     city = data.get("city")
-    cost = weight * CARGO_RATE
-    cost += weight * DELIVERY_MOSCOW_MINSK
+    # Тарифы (можно потом вынести в переменные окружения)
+    cargo_rate = 3.5
+    delivery_moscow_minsk = 1.6
+    delivery_minsk_lida = 0.8
+    transfer_fee = 10.0
+    extra_rate = 0.0
+    fixed_cost = 0.0
+    cost = weight * cargo_rate
+    cost += weight * delivery_moscow_minsk
     if city == "Лида":
-        cost += weight * DELIVERY_MINSK_LIDA
-    cost += TRANSFER_FEE
-    cost += weight * EXTRA_RATE
-    cost += FIXED_COST
+        cost += weight * delivery_minsk_lida
+    cost += transfer_fee
+    cost += weight * extra_rate
+    cost += fixed_cost
     await message.answer(
         f"📦 Примерная стоимость доставки до {city} для веса {weight:.2f} кг:\n"
         f"💰 {cost:.2f} руб.\n\n"
-        f"* Карго (Китай→Москва): {CARGO_RATE:.2f} руб/кг\n"
-        f"* Москва→Минск: {DELIVERY_MOSCOW_MINSK:.2f} руб/кг\n"
-        f"{'* Минск→Лида: ' + str(DELIVERY_MINSK_LIDA) + ' руб/кг' if city == 'Лида' else ''}\n"
-        f"* Плата за передачу: {TRANSFER_FEE:.2f} руб\n"
-        f"* Доп. расходы: {EXTRA_RATE:.2f} руб/кг + {FIXED_COST:.2f} руб\n"
+        f"* Карго (Китай→Москва): {cargo_rate:.2f} руб/кг\n"
+        f"* Москва→Минск: {delivery_moscow_minsk:.2f} руб/кг\n"
+        f"{'* Минск→Лида: ' + str(delivery_minsk_lida) + ' руб/кг' if city == 'Лида' else ''}\n"
+        f"* Плата за передачу: {transfer_fee:.2f} руб\n"
+        f"* Доп. расходы: {extra_rate:.2f} руб/кг + {fixed_cost:.2f} руб\n"
         f"Точная стоимость может отличаться.",
         reply_markup=main_keyboard
     )
     await state.clear()
 
-# === Массовая рассылка по датам (только для владельца) ===
+# === Массовая рассылка ===
 @dp.message(Command("broadcast"))
 async def broadcast_cmd(message: types.Message):
     if message.from_user.id != OWNER_ID:
@@ -373,7 +372,6 @@ async def broadcast_cmd(message: types.Message):
     except:
         await message.answer("❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД")
         return
-    # Получаем уникальных пользователей с треками в диапазоне
     res = supabase.table("tracks").select("user_id").gte("created_at", start_date.isoformat()).lte("created_at", end_date.isoformat()).execute()
     user_ids = list(set(t["user_id"] for t in res.data))
     if not user_ids:
@@ -386,11 +384,11 @@ async def broadcast_cmd(message: types.Message):
             await bot.send_message(uid, f"📢 {text}")
             sent += 1
             await asyncio.sleep(0.05)
-        except Exception as e:
-            print(f"Не удалось отправить {uid}: {e}")
+        except:
+            pass
     await message.answer(f"✅ Рассылка завершена. Отправлено {sent} сообщений.")
 
-# === FSM обработчики (профиль, треки, удаление) ===
+# === FSM обработчики ===
 @dp.message(ProfileForm.waiting_for_fullname)
 async def process_fullname(message: types.Message, state: FSMContext):
     if message.text == "Отмена":
@@ -488,11 +486,11 @@ async def process_delete_track(message: types.Message, state: FSMContext):
         await message.answer("Введи правильный номер!", reply_markup=cancel_keyboard)
     await state.clear()
 
-# === Самопинг и автоматический перезапуск ===
+# === Самопинг ===
 async def keep_alive():
-    url = "https://track-bot-fresh.onrender.com"  # замените на ваш реальный URL, если он другой
+    url = "https://track-bot-fresh.onrender.com"
     while True:
-        await asyncio.sleep(600)  # 10 минут
+        await asyncio.sleep(600)
         try:
             async with aiohttp.ClientSession() as session:
                 await session.get(url, timeout=5)
