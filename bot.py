@@ -14,10 +14,18 @@ from openpyxl import Workbook
 import aiohttp
 
 # === Конфигурация ===
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # новый токен подставится из переменной
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", 6810564564))
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+# Тарифы для калькулятора (из переменных окружения)
+CARGO_RATE = float(os.getenv("CARGO_RATE", 3.5))
+DELIVERY_MOSCOW_MINSK = float(os.getenv("DELIVERY_MOSCOW_MINSK", 1.6))
+DELIVERY_MINSK_LIDA = float(os.getenv("DELIVERY_MINSK_LIDA", 0.8))
+TRANSFER_FEE = float(os.getenv("TRANSFER_FEE", 10.0))
+EXTRA_RATE = float(os.getenv("EXTRA_RATE", 0.0))
+FIXED_COST = float(os.getenv("FIXED_COST", 0.0))
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -311,7 +319,6 @@ async def calc_button(message: types.Message, state: FSMContext):
 
 @dp.message(Command("calc"))
 async def calc_command(message: types.Message, state: FSMContext):
-    # То же самое, что и кнопка
     keyboard = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="Минск"), KeyboardButton(text="Лида")]],
         resize_keyboard=True
@@ -338,34 +345,28 @@ async def calc_result(message: types.Message, state: FSMContext):
         return
     data = await state.get_data()
     city = data.get("city")
-    # Тарифы (можно вынести в переменные окружения)
-    cargo_rate = 3.5
-    delivery_moscow_minsk = 1.6
-    delivery_minsk_lida = 0.8
-    transfer_fee = 10.0
-    extra_rate = 0.0
-    fixed_cost = 0.0
-    cost = weight * cargo_rate
-    cost += weight * delivery_moscow_minsk
+    # Используем тарифы из переменных окружения
+    cost = weight * CARGO_RATE
+    cost += weight * DELIVERY_MOSCOW_MINSK
     if city == "Лида":
-        cost += weight * delivery_minsk_lida
-    cost += transfer_fee
-    cost += weight * extra_rate
-    cost += fixed_cost
+        cost += weight * DELIVERY_MINSK_LIDA
+    cost += TRANSFER_FEE
+    cost += weight * EXTRA_RATE
+    cost += FIXED_COST
     await message.answer(
         f"📦 Примерная стоимость доставки до {city} для веса {weight:.2f} кг:\n"
         f"💰 {cost:.2f} руб.\n\n"
-        f"* Карго (Китай→Москва): {cargo_rate:.2f} руб/кг\n"
-        f"* Москва→Минск: {delivery_moscow_minsk:.2f} руб/кг\n"
-        f"{'* Минск→Лида: ' + str(delivery_minsk_lida) + ' руб/кг' if city == 'Лида' else ''}\n"
-        f"* Плата за передачу: {transfer_fee:.2f} руб\n"
-        f"* Доп. расходы: {extra_rate:.2f} руб/кг + {fixed_cost:.2f} руб\n"
+        f"* Карго (Китай→Москва): {CARGO_RATE:.2f} руб/кг\n"
+        f"* Москва→Минск: {DELIVERY_MOSCOW_MINSK:.2f} руб/кг\n"
+        f"{'* Минск→Лида: ' + str(DELIVERY_MINSK_LIDA) + ' руб/кг' if city == 'Лида' else ''}\n"
+        f"* Плата за передачу: {TRANSFER_FEE:.2f} руб\n"
+        f"* Доп. расходы: {EXTRA_RATE:.2f} руб/кг + {FIXED_COST:.2f} руб\n"
         f"Точная стоимость может отличаться.",
         reply_markup=main_keyboard
     )
     await state.clear()
 
-# === Массовая рассылка (исправленная) ===
+# === Массовая рассылка ===
 @dp.message(Command("broadcast"))
 async def broadcast_cmd(message: types.Message):
     if message.from_user.id != OWNER_ID:
