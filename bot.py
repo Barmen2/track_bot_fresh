@@ -12,13 +12,20 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 from supabase import create_client, Client
 from openpyxl import Workbook
 import aiohttp
-from aiohttp import web
 
-# === Конфигурация (из переменных окружения) ===
+# === Конфигурация из переменных окружения ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", 6810564564))
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+# Тарифы для калькулятора (из переменных окружения)
+CARGO_RATE = float(os.getenv("CARGO_RATE", 3.5))
+DELIVERY_MOSCOW_MINSK = float(os.getenv("DELIVERY_MOSCOW_MINSK", 1.6))
+DELIVERY_MINSK_LIDA = float(os.getenv("DELIVERY_MINSK_LIDA", 0.8))
+TRANSFER_FEE = float(os.getenv("TRANSFER_FEE", 10.0))
+EXTRA_RATE = float(os.getenv("EXTRA_RATE", 0.0))
+FIXED_COST = float(os.getenv("FIXED_COST", 0.0))
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -31,7 +38,7 @@ main_keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="Новый трек")],
         [KeyboardButton(text="Мои треки"), KeyboardButton(text="Редактировать профиль")],
         [KeyboardButton(text="Удалить трек"), KeyboardButton(text="📊 Выгрузить Excel")],
-        [KeyboardButton(text="💱 Конвертер валют")]
+        [KeyboardButton(text="💱 Конвертер валют"), KeyboardButton(text="Калькулятор доставки")]
     ],
     resize_keyboard=True
 )
@@ -61,7 +68,11 @@ class DeleteTrackForm(StatesGroup):
 class CurrencyForm(StatesGroup):
     waiting_for_amount = State()
 
-# === Функции Supabase (московское время) ===
+class CalcForm(StatesGroup):
+    waiting_for_city = State()
+    waiting_for_weight = State()
+
+# === Supabase функции (московское время) ===
 def get_msk_time():
     return datetime.now(timezone.utc) + timedelta(hours=3)
 
@@ -297,7 +308,89 @@ async def export_to_excel(message: types.Message):
         caption=f"📊 Ваши треки в Excel\nФИО: {full_name}\nТелефон: {phone}"
     )
 
-# === FSM обработчики ===
+@dp.message(F.text == "Калькулятор доставки")
+async def calc_city(message: types.Message, state: FSMContext):
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Минск"), KeyboardButton(text="Лида")]],
+        resize_keyboard=True
+    )
+    await state.set_state(CalcForm.waiting_for_city)
+    await message.answer("Выберите город назначения:", reply_markup=keyboard)
+
+@dp.message(CalcForm.waiting_for_city)
+async def calc_weight(message: types.Message, state: FSMContext):
+    city = message.text
+    if city not in ["Минск", "Лида"]:
+        await message.answer("Пожалуйста, выберите город из кнопок.")
+        return
+    await state.update_data(city=city)
+    await state.set_state(CalcForm.waiting_for_weight)
+    await message.answer("Введите вес посылки в килограммах (например, 2.5):", reply_markup=cancel_keyboard)
+
+@dp.message(CalcForm.waiting_for_weight)
+async def calc_result(message: types.Message, state: FSMContext):
+    try:
+        weight = float(message.text.replace(',', '.'))
+    except:
+        await message.answer("❌ Пожалуйста, введите число (например, 2.5).", reply_markup=cancel_keyboard)
+        return
+    data = await state.get_data()
+    city = data.get("city")
+    cost = weight * CARGO_RATE
+    cost += weight * DELIVERY_MOSCOW_MINSK
+    if city == "Лида":
+        cost += weight * DELIVERY_MINSK_LIDA
+    cost += TRANSFER_FEE
+    cost += weight * EXTRA_RATE
+    cost += FIXED_COST
+    await message.answer(
+        f"📦 Примерная стоимость доставки до {city} для веса {weight:.2f} кг:\n"
+        f"💰 {cost:.2f} руб.\n\n"
+        f"* Карго (Китай→Москва): {CARGO_RATE:.2f} руб/кг\n"
+        f"* Москва→Минск: {DELIVERY_MOSCOW_MINSK:.2f} руб/кг\n"
+        f"{'* Минск→Лида: ' + str(DELIVERY_MINSK_LIDA) + ' руб/кг' if city == 'Лида' else ''}\n"
+        f"* Плата за передачу: {TRANSFER_FEE:.2f} руб\n"
+        f"* Доп. расходы: {EXTRA_RATE:.2f} руб/кг + {FIXED_COST:.2f} руб\n"
+        f"Точная стоимость может отличаться.",
+        reply_markup=main_keyboard
+    )
+    await state.clear()
+
+# === Массовая рассылка по датам (только для владельца) ===
+@dp.message(Command("broadcast"))
+async def broadcast_cmd(message: types.Message):
+    if message.from_user.id != OWNER_ID:
+        await message.answer("⛔ У вас нет прав для этой команды.")
+        return
+    parts = message.text.split(maxsplit=3)
+    if len(parts) < 4:
+        await message.answer("❌ Использование: /broadcast ГГГГ-ММ-ДД ГГГГ-ММ-ДД Текст сообщения")
+        return
+    start_date_str, end_date_str, text = parts[1], parts[2], parts[3]
+    try:
+        start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+        end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
+    except:
+        await message.answer("❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД")
+        return
+    # Получаем уникальных пользователей с треками в диапазоне
+    res = supabase.table("tracks").select("user_id").gte("created_at", start_date.isoformat()).lte("created_at", end_date.isoformat()).execute()
+    user_ids = list(set(t["user_id"] for t in res.data))
+    if not user_ids:
+        await message.answer("📭 Нет пользователей с треками в указанном диапазоне.")
+        return
+    await message.answer(f"👥 Найдено {len(user_ids)} пользователей. Начинаю рассылку...")
+    sent = 0
+    for uid in user_ids:
+        try:
+            await bot.send_message(uid, f"📢 {text}")
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            print(f"Не удалось отправить {uid}: {e}")
+    await message.answer(f"✅ Рассылка завершена. Отправлено {sent} сообщений.")
+
+# === FSM обработчики (профиль, треки, удаление) ===
 @dp.message(ProfileForm.waiting_for_fullname)
 async def process_fullname(message: types.Message, state: FSMContext):
     if message.text == "Отмена":
@@ -395,23 +488,9 @@ async def process_delete_track(message: types.Message, state: FSMContext):
         await message.answer("Введи правильный номер!", reply_markup=cancel_keyboard)
     await state.clear()
 
-# === Веб-сервер для Render (обязательно) ===
-async def handle_web(request):
-    return web.Response(text="Bot is running", status=200)
-
-async def start_web():
-    port = int(os.environ.get("PORT", 8000))
-    app = web.Application()
-    app.router.add_get("/", handle_web)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"Веб-сервер запущен на порту {port}")
-
-# === Самопинг ===
+# === Самопинг и автоматический перезапуск ===
 async def keep_alive():
-    url = "https://track-bot-fresh.onrender.com"  # ЗДЕСЬ ВАШ URL
+    url = "https://track-bot-fresh.onrender.com"  # замените на ваш реальный URL, если он другой
     while True:
         await asyncio.sleep(600)  # 10 минут
         try:
@@ -433,7 +512,7 @@ async def run_bot():
 
 async def main():
     print("Бот запущен...")
-    await asyncio.gather(keep_alive(), run_bot(), start_web())
+    await asyncio.gather(keep_alive(), run_bot())
 
 if __name__ == "__main__":
     asyncio.run(main())
