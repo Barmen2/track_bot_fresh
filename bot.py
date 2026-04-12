@@ -328,7 +328,7 @@ async def calc_result(message: types.Message, state: FSMContext):
         return
     data = await state.get_data()
     city = data.get("city")
-    # Тарифы (можно потом вынести в переменные окружения)
+    # Тарифы (можно изменить при необходимости)
     cargo_rate = 3.5
     delivery_moscow_minsk = 1.6
     delivery_minsk_lida = 0.8
