@@ -14,7 +14,7 @@ from openpyxl import Workbook
 import aiohttp
 
 # === Конфигурация ===
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # новый токен подставится из переменной
 OWNER_ID = int(os.getenv("OWNER_ID", 6810564564))
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -64,7 +64,7 @@ class CalcForm(StatesGroup):
     waiting_for_city = State()
     waiting_for_weight = State()
 
-# === Supabase функции ===
+# === Supabase функции (московское время) ===
 def get_msk_time():
     return datetime.now(timezone.utc) + timedelta(hours=3)
 
@@ -301,7 +301,17 @@ async def export_to_excel(message: types.Message):
     )
 
 @dp.message(F.text == "📦 Калькулятор доставки")
-async def calc_city(message: types.Message, state: FSMContext):
+async def calc_button(message: types.Message, state: FSMContext):
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Минск"), KeyboardButton(text="Лида")]],
+        resize_keyboard=True
+    )
+    await state.set_state(CalcForm.waiting_for_city)
+    await message.answer("Выберите город назначения:", reply_markup=keyboard)
+
+@dp.message(Command("calc"))
+async def calc_command(message: types.Message, state: FSMContext):
+    # То же самое, что и кнопка
     keyboard = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="Минск"), KeyboardButton(text="Лида")]],
         resize_keyboard=True
@@ -328,7 +338,7 @@ async def calc_result(message: types.Message, state: FSMContext):
         return
     data = await state.get_data()
     city = data.get("city")
-    # Тарифы (можно изменить при необходимости)
+    # Тарифы (можно вынести в переменные окружения)
     cargo_rate = 3.5
     delivery_moscow_minsk = 1.6
     delivery_minsk_lida = 0.8
@@ -355,7 +365,7 @@ async def calc_result(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
-# === Массовая рассылка ===
+# === Массовая рассылка (исправленная) ===
 @dp.message(Command("broadcast"))
 async def broadcast_cmd(message: types.Message):
     if message.from_user.id != OWNER_ID:
@@ -369,10 +379,14 @@ async def broadcast_cmd(message: types.Message):
     try:
         start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
         end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
+        # Устанавливаем время на начало и конец дня в московском часовом поясе
+        start_datetime = start_date.replace(tzinfo=timezone(timedelta(hours=3)))
+        end_datetime = end_date.replace(hour=23, minute=59, second=59, tzinfo=timezone(timedelta(hours=3)))
     except:
         await message.answer("❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД")
         return
-    res = supabase.table("tracks").select("user_id").gte("created_at", start_date.isoformat()).lte("created_at", end_date.isoformat()).execute()
+    # Преобразуем в isoformat для сравнения с created_at (который хранится в MSK)
+    res = supabase.table("tracks").select("user_id").gte("created_at", start_datetime.isoformat()).lte("created_at", end_datetime.isoformat()).execute()
     user_ids = list(set(t["user_id"] for t in res.data))
     if not user_ids:
         await message.answer("📭 Нет пользователей с треками в указанном диапазоне.")
@@ -486,7 +500,7 @@ async def process_delete_track(message: types.Message, state: FSMContext):
         await message.answer("Введи правильный номер!", reply_markup=cancel_keyboard)
     await state.clear()
 
-# === Самопинг ===
+# === Самопинг и автоматический перезапуск ===
 async def keep_alive():
     url = "https://track-bot-fresh.onrender.com"
     while True:
