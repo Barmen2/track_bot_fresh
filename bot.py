@@ -39,8 +39,8 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Новый трек")],
-        [KeyboardButton(text="📋 Мои треки"), KeyboardButton(text="Редактировать профиль")],
-        [KeyboardButton(text="Удалить трек"), KeyboardButton(text="📊 Мои треки (Excel)")],
+        [KeyboardButton(text="📋 Мои треки"), KeyboardButton(text="📊 Мои треки (Excel)")],
+        [KeyboardButton(text="Редактировать профиль"), KeyboardButton(text="Удалить трек")],
         [KeyboardButton(text="💱 Конвертер валют"), KeyboardButton(text="📦 Калькулятор доставки")],
         [KeyboardButton(text="✅ Завершить и отправить")]
     ],
@@ -51,8 +51,8 @@ main_keyboard = ReplyKeyboardMarkup(
 owner_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Новый трек")],
-        [KeyboardButton(text="📋 Мои треки"), KeyboardButton(text="Редактировать профиль")],
-        [KeyboardButton(text="Удалить трек"), KeyboardButton(text="📊 Мои треки (Excel)")],
+        [KeyboardButton(text="📋 Мои треки"), KeyboardButton(text="📊 Мои треки (Excel)")],
+        [KeyboardButton(text="Редактировать профиль"), KeyboardButton(text="Удалить трек")],
         [KeyboardButton(text="💱 Конвертер валют"), KeyboardButton(text="📦 Калькулятор доставки")],
         [KeyboardButton(text="✅ Завершить и отправить")],
         [KeyboardButton(text="📢 Сделать рассылку")]
