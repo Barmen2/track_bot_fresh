@@ -150,7 +150,11 @@ def get_total_sum_byn(user_id):
     tracks = get_user_tracks(user_id)
     return round(sum(t["price_byn"] * t["quantity"] for t in tracks), 2)
 
-# === ПОЛУЧЕНИЕ КУРСОВ ===
+def get_total_quantity(user_id):
+    tracks = get_user_tracks(user_id)
+    return sum(t["quantity"] for t in tracks)
+
+# === ПОЛУЧЕНИЕ КУРСОВ (единый надёжный способ) ===
 async def get_cny_to_usd_rate():
     try:
         async with aiohttp.ClientSession() as session:
@@ -160,7 +164,7 @@ async def get_cny_to_usd_rate():
                     return data["rates"]["USD"]
     except:
         pass
-    return 0.14
+    return 0.14  # fallback
 
 async def get_usd_to_byn_rate():
     try:
@@ -171,39 +175,43 @@ async def get_usd_to_byn_rate():
                     return data["rates"]["BYN"]
     except:
         pass
-    return 3.2
+    return 3.2  # fallback
 
-async def get_exchange_rates():
+async def get_cny_to_usd_and_usd_to_byn():
+    cny_to_usd = await get_cny_to_usd_rate()
     usd_to_byn = await get_usd_to_byn_rate()
-    usd_to_cny = None
+    return cny_to_usd, usd_to_byn
+
+# === КОНВЕРТЕР ДЛЯ КНОПКИ "Конвертер валют" ===
+async def get_all_rates():
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get("https://api.exchangerate.host/latest?base=USD&symbols=CNY,BYN", timeout=10) as resp:
+            async with session.get("https://api.exchangerate.host/latest?base=USD", timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    usd_to_cny = data["rates"].get("CNY")
-                    if usd_to_byn is None:
-                        usd_to_byn = data["rates"].get("BYN")
+                    rates = data.get("rates", {})
+                    usd_to_byn = rates.get("BYN")
+                    usd_to_cny = rates.get("CNY")
+                    if usd_to_byn and usd_to_cny:
+                        return usd_to_byn, usd_to_cny
     except:
         pass
-    return usd_to_byn, usd_to_cny
+    return None, None
 
-# === СОЗДАНИЕ EXCEL (С НУМЕРАЦИЕЙ И ПОДСЧЁТОМ ТРЕКОВ) ===
+# === СОЗДАНИЕ EXCEL (С НУМЕРАЦИЕЙ, КОЛИЧЕСТВОМ ТРЕКОВ И ОБЩИМ КОЛИЧЕСТВОМ ЕДИНИЦ) ===
 def create_excel(tracks, full_name, phone, user_id):
     wb = Workbook()
     ws = wb.active
     ws.title = "Треки"
 
-    # Заголовки (добавлен столбец "№")
     headers = ["№", "Трек-номер", "Товар", "Цена (CNY)", "Цена (USD)", "Цена (BYN)", "Кол-во", "Ед. изм.", "Дата"]
     for col, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col, value=header)
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal="center")
 
-    # Данные с нумерацией
     for row_idx, t in enumerate(tracks, start=2):
-        ws.cell(row=row_idx, column=1, value=row_idx - 1)  # номер строки
+        ws.cell(row=row_idx, column=1, value=row_idx - 1)
         ws.cell(row=row_idx, column=2, value=t["track_number"])
         ws.cell(row=row_idx, column=3, value=t["product_name"])
         ws.cell(row=row_idx, column=4, value=float(t["price_cny"]))
@@ -214,29 +222,28 @@ def create_excel(tracks, full_name, phone, user_id):
         dt = datetime.fromisoformat(t['created_at'])
         ws.cell(row=row_idx, column=9, value=dt.strftime("%Y-%m-%d %H:%M:%S"))
 
-    # Итоговая строка с общим количеством треков
     total_tracks = len(tracks)
+    total_quantity = get_total_quantity(user_id)
     last_row = len(tracks) + 2
     ws.cell(row=last_row, column=1, value="Всего треков:")
     ws.cell(row=last_row, column=2, value=total_tracks)
+    ws.cell(row=last_row+1, column=1, value="Общее количество единиц:")
+    ws.cell(row=last_row+1, column=2, value=total_quantity)
 
-    # Итоговые суммы по валютам
     total_cny = get_total_sum_cny(user_id)
     total_usd = get_total_sum_usd(user_id)
     total_byn = get_total_sum_byn(user_id)
-    ws.cell(row=last_row+1, column=7, value="ИТОГО (CNY):")
-    ws.cell(row=last_row+1, column=8, value=f"{total_cny:.2f}")
-    ws.cell(row=last_row+2, column=7, value="ИТОГО (USD):")
-    ws.cell(row=last_row+2, column=8, value=f"{total_usd:.2f}")
-    ws.cell(row=last_row+3, column=7, value="ИТОГО (BYN):")
-    ws.cell(row=last_row+3, column=8, value=f"{total_byn:.2f}")
+    ws.cell(row=last_row+2, column=7, value="ИТОГО (CNY):")
+    ws.cell(row=last_row+2, column=8, value=f"{total_cny:.2f}")
+    ws.cell(row=last_row+3, column=7, value="ИТОГО (USD):")
+    ws.cell(row=last_row+3, column=8, value=f"{total_usd:.2f}")
+    ws.cell(row=last_row+4, column=7, value="ИТОГО (BYN):")
+    ws.cell(row=last_row+4, column=8, value=f"{total_byn:.2f}")
 
-    # Информация о пользователе
-    ws.cell(row=last_row+5, column=1, value=f"ФИО: {full_name}")
-    ws.cell(row=last_row+6, column=1, value=f"Телефон: {phone}")
-    ws.cell(row=last_row+7, column=1, value=f"ID: {user_id}")
+    ws.cell(row=last_row+6, column=1, value=f"ФИО: {full_name}")
+    ws.cell(row=last_row+7, column=1, value=f"Телефон: {phone}")
+    ws.cell(row=last_row+8, column=1, value=f"ID: {user_id}")
 
-    # Автоширина колонок
     for col in range(1, 10):
         ws.column_dimensions[chr(64+col)].width = 18
 
@@ -522,7 +529,7 @@ async def process_currency_amount(message: types.Message, state: FSMContext):
         return
     data = await state.get_data()
     action = data.get('currency_action')
-    usd_to_byn, usd_to_cny = await get_exchange_rates()
+    usd_to_byn, usd_to_cny = await get_all_rates()
     if usd_to_byn is None or usd_to_cny is None:
         await message.answer("❌ Не удалось получить курсы. Попробуйте позже.")
         await state.clear()
