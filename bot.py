@@ -150,7 +150,7 @@ def get_total_sum_byn(user_id):
     tracks = get_user_tracks(user_id)
     return round(sum(t["price_byn"] * t["quantity"] for t in tracks), 2)
 
-# === ПОЛУЧЕНИЕ КУРСОВ (ПРОСТЫЕ API) ===
+# === ПОЛУЧЕНИЕ КУРСОВ ===
 async def get_cny_to_usd_rate():
     try:
         async with aiohttp.ClientSession() as session:
@@ -160,7 +160,7 @@ async def get_cny_to_usd_rate():
                     return data["rates"]["USD"]
     except:
         pass
-    return 0.14  # fallback
+    return 0.14
 
 async def get_usd_to_byn_rate():
     try:
@@ -171,7 +171,7 @@ async def get_usd_to_byn_rate():
                     return data["rates"]["BYN"]
     except:
         pass
-    return 3.2  # fallback
+    return 3.2
 
 async def get_exchange_rates():
     usd_to_byn = await get_usd_to_byn_rate()
@@ -188,50 +188,57 @@ async def get_exchange_rates():
         pass
     return usd_to_byn, usd_to_cny
 
-# === СОЗДАНИЕ EXCEL (УПРОЩЁННО, БЕЗ ОШИБОК) ===
+# === СОЗДАНИЕ EXCEL (С НУМЕРАЦИЕЙ И ПОДСЧЁТОМ ТРЕКОВ) ===
 def create_excel(tracks, full_name, phone, user_id):
     wb = Workbook()
     ws = wb.active
     ws.title = "Треки"
 
-    # Заголовки
-    headers = ["Трек-номер", "Товар", "Цена (CNY)", "Цена (USD)", "Цена (BYN)", "Кол-во", "Ед. изм.", "Дата"]
+    # Заголовки (добавлен столбец "№")
+    headers = ["№", "Трек-номер", "Товар", "Цена (CNY)", "Цена (USD)", "Цена (BYN)", "Кол-во", "Ед. изм.", "Дата"]
     for col, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col, value=header)
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal="center")
 
-    # Данные
-    for row, t in enumerate(tracks, start=2):
-        ws.cell(row=row, column=1, value=t["track_number"])
-        ws.cell(row=row, column=2, value=t["product_name"])
-        ws.cell(row=row, column=3, value=float(t["price_cny"]))
-        ws.cell(row=row, column=4, value=float(t["price_usd"]))
-        ws.cell(row=row, column=5, value=float(t["price_byn"]))
-        ws.cell(row=row, column=6, value=int(t["quantity"]))
-        ws.cell(row=row, column=7, value=t["quantity_type"])
+    # Данные с нумерацией
+    for row_idx, t in enumerate(tracks, start=2):
+        ws.cell(row=row_idx, column=1, value=row_idx - 1)  # номер строки
+        ws.cell(row=row_idx, column=2, value=t["track_number"])
+        ws.cell(row=row_idx, column=3, value=t["product_name"])
+        ws.cell(row=row_idx, column=4, value=float(t["price_cny"]))
+        ws.cell(row=row_idx, column=5, value=float(t["price_usd"]))
+        ws.cell(row=row_idx, column=6, value=float(t["price_byn"]))
+        ws.cell(row=row_idx, column=7, value=int(t["quantity"]))
+        ws.cell(row=row_idx, column=8, value=t["quantity_type"])
         dt = datetime.fromisoformat(t['created_at'])
-        ws.cell(row=row, column=8, value=dt.strftime("%Y-%m-%d %H:%M:%S"))
+        ws.cell(row=row_idx, column=9, value=dt.strftime("%Y-%m-%d %H:%M:%S"))
 
-    # Итоги
+    # Итоговая строка с общим количеством треков
+    total_tracks = len(tracks)
+    last_row = len(tracks) + 2
+    ws.cell(row=last_row, column=1, value="Всего треков:")
+    ws.cell(row=last_row, column=2, value=total_tracks)
+
+    # Итоговые суммы по валютам
     total_cny = get_total_sum_cny(user_id)
     total_usd = get_total_sum_usd(user_id)
     total_byn = get_total_sum_byn(user_id)
-    last_row = len(tracks) + 2
-    ws.cell(row=last_row, column=6, value="ИТОГО (CNY):")
-    ws.cell(row=last_row, column=7, value=f"{total_cny:.2f}")
-    ws.cell(row=last_row+1, column=6, value="ИТОГО (USD):")
-    ws.cell(row=last_row+1, column=7, value=f"{total_usd:.2f}")
-    ws.cell(row=last_row+2, column=6, value="ИТОГО (BYN):")
-    ws.cell(row=last_row+2, column=7, value=f"{total_byn:.2f}")
+    ws.cell(row=last_row+1, column=7, value="ИТОГО (CNY):")
+    ws.cell(row=last_row+1, column=8, value=f"{total_cny:.2f}")
+    ws.cell(row=last_row+2, column=7, value="ИТОГО (USD):")
+    ws.cell(row=last_row+2, column=8, value=f"{total_usd:.2f}")
+    ws.cell(row=last_row+3, column=7, value="ИТОГО (BYN):")
+    ws.cell(row=last_row+3, column=8, value=f"{total_byn:.2f}")
 
-    # Инфо о пользователе
-    ws.cell(row=last_row+4, column=1, value=f"ФИО: {full_name}")
-    ws.cell(row=last_row+5, column=1, value=f"Телефон: {phone}")
-    ws.cell(row=last_row+6, column=1, value=f"ID: {user_id}")
+    # Информация о пользователе
+    ws.cell(row=last_row+5, column=1, value=f"ФИО: {full_name}")
+    ws.cell(row=last_row+6, column=1, value=f"Телефон: {phone}")
+    ws.cell(row=last_row+7, column=1, value=f"ID: {user_id}")
 
-    for col in range(1, 9):
-        ws.column_dimensions[chr(64+col)].width = 20
+    # Автоширина колонок
+    for col in range(1, 10):
+        ws.column_dimensions[chr(64+col)].width = 18
 
     output = BytesIO()
     wb.save(output)
@@ -546,7 +553,6 @@ async def finish_and_send(message: types.Message):
         await message.answer("Профиль не найден.")
         return
     full_name, phone = profile
-    # Текстовый отчёт
     text = f"📦 ТРЕКИ ПОЛЬЗОВАТЕЛЯ\n👤 {message.from_user.full_name} (@{message.from_user.username or 'нет'})\n📞 {full_name}\n📞 {phone}\n\n"
     for i, t in enumerate(tracks, 1):
         dt = datetime.fromisoformat(t['created_at'])
@@ -555,7 +561,6 @@ async def finish_and_send(message: types.Message):
     total_usd = get_total_sum_usd(user_id)
     total_byn = get_total_sum_byn(user_id)
     text += f"💰 Итого: {total_cny:.2f} CNY ≈ {total_usd:.2f} USD ≈ {total_byn:.2f} BYN"
-    # Excel
     excel_file = create_excel(tracks, full_name, phone, user_id)
     try:
         await bot.send_message(OWNER_ID, text)
