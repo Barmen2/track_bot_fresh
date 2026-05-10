@@ -35,26 +35,24 @@ dp = Dispatcher(storage=storage)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # === Клавиатуры ===
-# Базовая клавиатура для всех пользователей
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Новый трек")],
         [KeyboardButton(text="📋 Мои треки"), KeyboardButton(text="📊 Мои треки (Excel)")],
         [KeyboardButton(text="Редактировать профиль"), KeyboardButton(text="Удалить трек")],
         [KeyboardButton(text="💱 Конвертер валют"), KeyboardButton(text="📦 Калькулятор доставки")],
-        [KeyboardButton(text="✅ Завершить и отправить")]
+        [KeyboardButton(text="✅ Завершить и отправить"), KeyboardButton(text="🗑 Удалить все треки")]
     ],
     resize_keyboard=True
 )
 
-# Расширенная клавиатура для владельца
 owner_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Новый трек")],
         [KeyboardButton(text="📋 Мои треки"), KeyboardButton(text="📊 Мои треки (Excel)")],
         [KeyboardButton(text="Редактировать профиль"), KeyboardButton(text="Удалить трек")],
         [KeyboardButton(text="💱 Конвертер валют"), KeyboardButton(text="📦 Калькулятор доставки")],
-        [KeyboardButton(text="✅ Завершить и отправить")],
+        [KeyboardButton(text="✅ Завершить и отправить"), KeyboardButton(text="🗑 Удалить все треки")],
         [KeyboardButton(text="📢 Сделать рассылку")]
     ],
     resize_keyboard=True
@@ -76,7 +74,7 @@ class ProfileForm(StatesGroup):
 class TrackForm(StatesGroup):
     waiting_for_track = State()
     waiting_for_product = State()
-    waiting_for_price = State()
+    waiting_for_price_cny = State()   # цена в юанях
     waiting_for_quantity_type = State()
     waiting_for_quantity = State()
 
@@ -95,15 +93,22 @@ class BroadcastForm(StatesGroup):
     waiting_for_end_date = State()
     waiting_for_text = State()
 
-# === Supabase функции (московское время) ===
+class ConfirmDeleteAllForm(StatesGroup):
+    waiting_for_confirmation = State()
+
+# === Supabase функции ===
 def get_msk_time():
     return datetime.now(timezone.utc) + timedelta(hours=3)
 
 def get_user_profile(user_id):
-    res = supabase.table("users").select("full_name, phone").eq("user_id", user_id).execute()
-    if res.data:
-        return res.data[0]["full_name"], res.data[0]["phone"]
-    return None
+    try:
+        res = supabase.table("users").select("full_name, phone").eq("user_id", user_id).execute()
+        if res.data:
+            return res.data[0]["full_name"], res.data[0]["phone"]
+        return None
+    except Exception as e:
+        print(f"Ошибка get_user_profile: {e}")
+        return None
 
 def save_user_profile(user_id, username, full_name, phone):
     supabase.table("users").upsert({
@@ -114,33 +119,45 @@ def save_user_profile(user_id, username, full_name, phone):
         "created_at": get_msk_time().isoformat()
     }).execute()
 
-def add_track(user_id, track, product, price, qty_type, quantity):
+def add_track(user_id, track, product, price_cny, price_usd, qty_type, quantity):
     supabase.table("tracks").insert({
         "user_id": user_id,
         "track_number": track,
         "product_name": product,
-        "price": price,
+        "price_cny": price_cny,
+        "price_usd": price_usd,
         "quantity": quantity,
         "quantity_type": qty_type,
         "created_at": get_msk_time().isoformat()
     }).execute()
 
 def get_user_tracks(user_id):
-    res = supabase.table("tracks").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
-    return res.data
+    try:
+        res = supabase.table("tracks").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
+        return res.data
+    except Exception as e:
+        print(f"Ошибка get_user_tracks: {e}")
+        return []
 
 def delete_track(track_id, user_id):
     supabase.table("tracks").delete().eq("id", track_id).eq("user_id", user_id).execute()
 
-def get_total_sum(user_id):
-    tracks = get_user_tracks(user_id)
-    return round(sum(t["price"] * t["quantity"] for t in tracks), 2)
+def delete_all_tracks(user_id):
+    supabase.table("tracks").delete().eq("user_id", user_id).execute()
 
-# === Конвертер валют ===
-async def get_exchange_rates():
+def get_total_sum_cny(user_id):
+    tracks = get_user_tracks(user_id)
+    return round(sum(t["price_cny"] * t["quantity"] for t in tracks), 2)
+
+def get_total_sum_usd(user_id):
+    tracks = get_user_tracks(user_id)
+    return round(sum(t["price_usd"] * t["quantity"] for t in tracks), 2)
+
+# === Конвертер валют (получение курса CNY -> USD) ===
+async def get_cny_to_usd_rate():
     apis = [
-        "https://api.exchangerate.host/latest?base=USD",
-        "https://api.exchangerate-api.com/v4/latest/USD"
+        "https://api.exchangerate.host/latest?base=CNY&symbols=USD",
+        "https://api.exchangerate-api.com/v4/latest/CNY"
     ]
     for url in apis:
         try:
@@ -148,35 +165,35 @@ async def get_exchange_rates():
                 async with session.get(url, timeout=10) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        rates = data.get("rates", {})
-                        usd_to_byn = rates.get("BYN")
-                        usd_to_cny = rates.get("CNY")
-                        if usd_to_byn and usd_to_cny:
-                            return usd_to_byn, usd_to_cny
+                        if "rates" in data and "USD" in data["rates"]:
+                            return data["rates"]["USD"]
+                        elif "rates" in data and "USD" in data["rates"]:
+                            return data["rates"]["USD"]
         except:
             continue
-    return None, None
+    return None
 
-# === Вспомогательная функция для создания Excel-файла ===
+# === Excel ===
 def create_user_excel(user_id, full_name, phone, tracks):
     wb = Workbook()
     ws = wb.active
-    ws.title = "Треки пользователя"
+    ws.title = "Треки"
 
-    ws.merge_cells('A1:G1')
+    ws.merge_cells('A1:H1')
     ws['A1'] = f"ФИО: {full_name}"
-    ws.merge_cells('A2:G2')
+    ws.merge_cells('A2:H2')
     ws['A2'] = f"Телефон: {phone}"
-    ws.merge_cells('A3:G3')
+    ws.merge_cells('A3:H3')
     ws['A3'] = f"ID пользователя: {user_id}"
     ws['A5'] = "Трек-номер"
     ws['B5'] = "Товар"
-    ws['C5'] = "Цена за ед. ($)"
-    ws['D5'] = "Количество"
-    ws['E5'] = "Ед. изм."
-    ws['F5'] = "Дата"
-    ws['G5'] = "Общая сумма ($)"
-    for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G']:
+    ws['C5'] = "Цена (CNY)"
+    ws['D5'] = "Цена (USD)"
+    ws['E5'] = "Количество"
+    ws['F5'] = "Ед. изм."
+    ws['G5'] = "Дата"
+    ws['H5'] = "Общая сумма (USD)"
+    for col in ['A','B','C','D','E','F','G','H']:
         ws[f'{col}5'].font = Font(bold=True)
         ws[f'{col}5'].alignment = Alignment(horizontal="center")
         ws[f'{col}5'].fill = PatternFill(start_color="DDDDDD", end_color="DDDDDD", fill_type="solid")
@@ -185,20 +202,30 @@ def create_user_excel(user_id, full_name, phone, tracks):
     for track in tracks:
         ws[f'A{row}'] = track["track_number"]
         ws[f'B{row}'] = track["product_name"]
-        ws[f'C{row}'] = float(track["price"])
-        ws[f'D{row}'] = int(track["quantity"])
-        ws[f'E{row}'] = track["quantity_type"]
+        ws[f'C{row}'] = float(track["price_cny"])
+        ws[f'D{row}'] = float(track["price_usd"])
+        ws[f'E{row}'] = int(track["quantity"])
+        ws[f'F{row}'] = track["quantity_type"]
         dt = datetime.fromisoformat(track['created_at'])
-        ws[f'F{row}'] = dt.strftime("%Y-%m-%d %H:%M:%S")
-        ws[f'G{row}'] = float(track["price"]) * int(track["quantity"])
+        ws[f'G{row}'] = dt.strftime("%Y-%m-%d %H:%M:%S")
+        ws[f'H{row}'] = float(track["price_usd"]) * int(track["quantity"])
         row += 1
 
-    ws[f'F{row}'] = "ИТОГО:"
+    # Итоговые суммы
+    total_cny = get_total_sum_cny(user_id)
+    total_usd = get_total_sum_usd(user_id)
+    ws[f'F{row}'] = "ИТОГО (CNY):"
     ws[f'F{row}'].font = Font(bold=True)
-    ws[f'G{row}'] = f"=SUM(G6:G{row-1})"
+    ws[f'G{row}'] = f"{total_cny:.2f}"
+    ws[f'G{row}'].font = Font(bold=True)
+    row += 1
+    ws[f'F{row}'] = "ИТОГО (USD):"
+    ws[f'F{row}'].font = Font(bold=True)
+    ws[f'G{row}'] = f"{total_usd:.2f}"
     ws[f'G{row}'].font = Font(bold=True)
 
-    for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G']:
+    # Автоширина
+    for col in ['A','B','C','D','E','F','G','H']:
         max_len = 0
         for r in range(1, row+1):
             val = ws[f'{col}{r}'].value
@@ -225,6 +252,248 @@ async def cmd_start(message: types.Message, state: FSMContext):
         await state.set_state(ProfileForm.waiting_for_fullname)
         await message.answer("Введи твоё ФИО:", reply_markup=cancel_keyboard)
 
+@dp.message(ProfileForm.waiting_for_fullname)
+async def process_fullname(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await cancel_action(message, state)
+        return
+    await state.update_data(fullname=message.text)
+    await state.set_state(ProfileForm.waiting_for_phone)
+    await message.answer("Введи номер телефона:", reply_markup=cancel_keyboard)
+
+@dp.message(ProfileForm.waiting_for_phone)
+async def process_phone(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await cancel_action(message, state)
+        return
+    data = await state.get_data()
+    full_name = data.get("fullname")
+    if not full_name:
+        await message.answer("Ошибка. Начните заново с /start")
+        await state.clear()
+        return
+    phone = message.text.strip()
+    user_id = message.from_user.id
+    username = message.from_user.username or "нет"
+    try:
+        save_user_profile(user_id, username, full_name, phone)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка сохранения: {e}")
+        await state.clear()
+        return
+    await state.clear()
+    keyboard = owner_keyboard if user_id == OWNER_ID else main_keyboard
+    await message.answer("✅ Профиль сохранён! Теперь можно добавлять треки.", reply_markup=keyboard)
+
+@dp.message(F.text == "Редактировать профиль")
+async def edit_profile(message: types.Message, state: FSMContext):
+    await state.set_state(ProfileForm.waiting_for_fullname)
+    await message.answer("Введи новое ФИО:", reply_markup=cancel_keyboard)
+
+@dp.message(F.text == "Отмена")
+async def cancel_action(message: types.Message, state: FSMContext):
+    await state.clear()
+    keyboard = owner_keyboard if message.from_user.id == OWNER_ID else main_keyboard
+    await message.answer("Действие отменено", reply_markup=keyboard)
+
+@dp.message(F.text == "Новый трек")
+async def new_track(message: types.Message, state: FSMContext):
+    profile = get_user_profile(message.from_user.id)
+    if not profile:
+        await state.set_state(ProfileForm.waiting_for_fullname)
+        await message.answer("Сначала заполни профиль. Введи ФИО:", reply_markup=cancel_keyboard)
+        return
+    await state.set_state(TrackForm.waiting_for_track)
+    await message.answer("Введи трек-номер:", reply_markup=cancel_keyboard)
+
+@dp.message(TrackForm.waiting_for_track)
+async def process_track(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await cancel_action(message, state)
+        return
+    await state.update_data(track=message.text)
+    await state.set_state(TrackForm.waiting_for_product)
+    await message.answer("Введи наименование товара:", reply_markup=cancel_keyboard)
+
+@dp.message(TrackForm.waiting_for_product)
+async def process_product(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await cancel_action(message, state)
+        return
+    await state.update_data(product=message.text)
+    await state.set_state(TrackForm.waiting_for_price_cny)
+    await message.answer("Введи цену в **китайских юанях (CNY)**:\n(бот пересчитает в доллары по текущему курсу)", reply_markup=cancel_keyboard, parse_mode="Markdown")
+
+@dp.message(TrackForm.waiting_for_price_cny)
+async def process_price_cny(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await cancel_action(message, state)
+        return
+    match = re.search(r"(\d+(?:[.,]\d+)?)", message.text)
+    if not match:
+        await message.answer("Введи число!", reply_markup=cancel_keyboard)
+        return
+    price_cny = float(match.group(1).replace(",", "."))
+    # Получаем курс CNY -> USD
+    rate = await get_cny_to_usd_rate()
+    if rate is None:
+        await message.answer("❌ Не удалось получить курс CNY/USD. Попробуй позже.\nИспользую приблизительный курс 0.14", reply_markup=cancel_keyboard)
+        rate = 0.14  # fallback
+    price_usd = round(price_cny * rate, 2)
+    await state.update_data(price_cny=price_cny, price_usd=price_usd)
+    await state.set_state(TrackForm.waiting_for_quantity_type)
+    await message.answer(f"💰 Цена: {price_cny:.2f} CNY = {price_usd:.2f} USD\n\nВыбери единицу измерения:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="шт"), KeyboardButton(text="пара")]], resize_keyboard=True))
+
+@dp.message(TrackForm.waiting_for_quantity_type)
+async def process_quantity_type(message: types.Message, state: FSMContext):
+    if message.text not in ["шт", "пара"]:
+        await message.answer("Выбери кнопку: шт или пара")
+        return
+    await state.update_data(qtype=message.text)
+    await state.set_state(TrackForm.waiting_for_quantity)
+    await message.answer(f"Введи количество в {message.text}:", reply_markup=cancel_keyboard)
+
+@dp.message(TrackForm.waiting_for_quantity)
+async def process_quantity(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await cancel_action(message, state)
+        return
+    try:
+        quantity = int(message.text)
+    except:
+        await message.answer("Введи целое число!", reply_markup=cancel_keyboard)
+        return
+    data = await state.get_data()
+    add_track(
+        user_id=message.from_user.id,
+        track=data["track"],
+        product=data["product"],
+        price_cny=data["price_cny"],
+        price_usd=data["price_usd"],
+        qty_type=data["qtype"],
+        quantity=quantity
+    )
+    await state.clear()
+    keyboard = owner_keyboard if message.from_user.id == OWNER_ID else main_keyboard
+    await message.answer("✅ Трек добавлен! Цена в USD рассчитана по текущему курсу.", reply_markup=keyboard)
+
+@dp.message(F.text == "📋 Мои треки")
+async def my_tracks(message: types.Message):
+    tracks = get_user_tracks(message.from_user.id)
+    if not tracks:
+        await message.answer("У тебя пока нет треков.", reply_markup=main_keyboard)
+        return
+    text = "📋 ТВОИ ТРЕКИ:\n\n"
+    for i, t in enumerate(tracks, 1):
+        dt = datetime.fromisoformat(t['created_at'])
+        date_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+        text += f"{i}. Трек: {t['track_number']}\n   Товар: {t['product_name']}\n"
+        text += f"   Цена: {t['price_cny']:.2f} CNY = {t['price_usd']:.2f} USD\n"
+        text += f"   Кол-во: {t['quantity']} {t['quantity_type']}\n   Дата: {date_str}\n\n"
+    total_cny = get_total_sum_cny(message.from_user.id)
+    total_usd = get_total_sum_usd(message.from_user.id)
+    text += f"💰 **Общая сумма: {total_cny:.2f} CNY ≈ {total_usd:.2f} USD**"
+    await message.answer(text, reply_markup=main_keyboard, parse_mode="Markdown")
+
+@dp.message(F.text == "Удалить трек")
+async def delete_track_start(message: types.Message, state: FSMContext):
+    tracks = get_user_tracks(message.from_user.id)
+    if not tracks:
+        await message.answer("Нет треков для удаления.", reply_markup=main_keyboard)
+        return
+    text = "🗑 Выбери номер трека для удаления:\n"
+    for i, t in enumerate(tracks, 1):
+        text += f"{i}. {t['track_number']} - {t['product_name']}\n"
+    await state.set_state(DeleteTrackForm.waiting_for_track_id)
+    await state.update_data(tracks=tracks)
+    await message.answer(text, reply_markup=cancel_keyboard)
+
+@dp.message(DeleteTrackForm.waiting_for_track_id)
+async def process_delete_track(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    tracks = data["tracks"]
+    try:
+        idx = int(message.text) - 1
+        if idx < 0 or idx >= len(tracks):
+            raise ValueError
+        delete_track(tracks[idx]["id"], message.from_user.id)
+        keyboard = owner_keyboard if message.from_user.id == OWNER_ID else main_keyboard
+        await message.answer("✅ Трек удалён!", reply_markup=keyboard)
+    except:
+        await message.answer("Введи правильный номер!", reply_markup=cancel_keyboard)
+    await state.clear()
+
+@dp.message(F.text == "🗑 Удалить все треки")
+async def delete_all_tracks_start(message: types.Message, state: FSMContext):
+    tracks = get_user_tracks(message.from_user.id)
+    if not tracks:
+        await message.answer("У тебя и так нет треков.", reply_markup=main_keyboard)
+        return
+    await state.set_state(ConfirmDeleteAllForm.waiting_for_confirmation)
+    await message.answer("⚠️ **ВНИМАНИЕ!** Вы уверены, что хотите удалить **ВСЕ** свои треки? Это действие необратимо.\n\nНапишите `ДА` (заглавными буквами), чтобы подтвердить.", reply_markup=cancel_keyboard, parse_mode="Markdown")
+
+@dp.message(ConfirmDeleteAllForm.waiting_for_confirmation)
+async def confirm_delete_all(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await cancel_action(message, state)
+        return
+    if message.text.strip() == "ДА":
+        delete_all_tracks(message.from_user.id)
+        keyboard = owner_keyboard if message.from_user.id == OWNER_ID else main_keyboard
+        await message.answer("✅ Все ваши треки удалены.", reply_markup=keyboard)
+    else:
+        await message.answer("❌ Подтверждение не получено. Удаление отменено.", reply_markup=main_keyboard)
+    await state.clear()
+
+@dp.message(F.text == "📊 Мои треки (Excel)")
+async def export_to_excel(message: types.Message):
+    profile = get_user_profile(message.from_user.id)
+    if not profile:
+        await message.answer("Сначала заполните профиль (команда /start).")
+        return
+    tracks = get_user_tracks(message.from_user.id)
+    if not tracks:
+        await message.answer("Нет треков для выгрузки.")
+        return
+    output = create_user_excel(message.from_user.id, profile[0], profile[1], tracks)
+    await message.answer_document(
+        BufferedInputFile(output.getvalue(), filename=f"my_tracks_{message.from_user.id}.xlsx"),
+        caption=f"📊 Ваши треки в Excel\nКурс CNY/USD на момент добавления треков."
+    )
+
+@dp.message(F.text == "📦 Калькулятор доставки")
+async def calc_button(message: types.Message, state: FSMContext):
+    keyboard = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Минск"), KeyboardButton(text="Лида")]], resize_keyboard=True)
+    await state.set_state(CalcForm.waiting_for_city)
+    await message.answer("Выберите город:", reply_markup=keyboard)
+
+@dp.message(CalcForm.waiting_for_city)
+async def calc_weight(message: types.Message, state: FSMContext):
+    city = message.text
+    if city not in ["Минск", "Лида"]:
+        await message.answer("Выберите город из кнопок.")
+        return
+    await state.update_data(city=city)
+    await state.set_state(CalcForm.waiting_for_weight)
+    await message.answer("Введите вес (кг):", reply_markup=cancel_keyboard)
+
+@dp.message(CalcForm.waiting_for_weight)
+async def calc_result(message: types.Message, state: FSMContext):
+    try:
+        weight = float(message.text.replace(',', '.'))
+    except:
+        await message.answer("Введите число!")
+        return
+    data = await state.get_data()
+    city = data.get("city")
+    cost = weight * CARGO_RATE
+    cost += weight * DELIVERY_MOSCOW_MINSK
+    if city == "Лида":
+        cost += weight * DELIVERY_MINSK_LIDA
+    cost += TRANSFER_FEE
+    await message.answer(f"📦 Примерная стоимость доставки до {city} для веса {weight:.2f} кг: {cost:.2f} руб.", reply_markup=main_keyboard)
+    await state.clear()
+
 @dp.message(F.text == "💱 Конвертер валют")
 async def currency_button(message: types.Message, state: FSMContext):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -250,214 +519,65 @@ async def currency_callback(callback_query: CallbackQuery, state: FSMContext):
 async def process_currency_amount(message: types.Message, state: FSMContext):
     try:
         amount = float(message.text.replace(',', '.'))
-    except ValueError:
-        await message.answer("❌ Пожалуйста, введите число (например, 100 или 50.5).")
+    except:
+        await message.answer("Введите число!")
         return
     data = await state.get_data()
     action = data.get('currency_action')
-    if not action:
-        await state.clear()
-        await message.answer("Ошибка. Начните заново: /currency")
-        return
-    usd_to_byn, usd_to_cny = await get_exchange_rates()
+    usd_to_byn, usd_to_cny = await get_exchange_rates()  # из старого кода
     if usd_to_byn is None or usd_to_cny is None:
-        await message.answer("❌ Не удалось получить курсы валют. Попробуйте позже.")
+        await message.answer("❌ Не удалось получить курсы. Попробуйте позже.")
         await state.clear()
         return
-    result = ""
     if action == "convert_cny_to_all":
-        usd_amount = amount / usd_to_cny
-        byn_amount = usd_amount * usd_to_byn
-        result = f"{amount:.2f} CNY = {usd_amount:.2f} USD\n{amount:.2f} CNY = {byn_amount:.2f} BYN"
+        usd = amount / usd_to_cny
+        byn = usd * usd_to_byn
+        await message.answer(f"{amount:.2f} CNY = {usd:.2f} USD = {byn:.2f} BYN")
     elif action == "convert_usd_to_byn":
-        byn_amount = amount * usd_to_byn
-        result = f"{amount:.2f} USD = {byn_amount:.2f} BYN"
+        byn = amount * usd_to_byn
+        await message.answer(f"{amount:.2f} USD = {byn:.2f} BYN")
     elif action == "convert_byn_to_usd":
-        usd_amount = amount / usd_to_byn
-        result = f"{amount:.2f} BYN = {usd_amount:.2f} USD"
+        usd = amount / usd_to_byn
+        await message.answer(f"{amount:.2f} BYN = {usd:.2f} USD")
     else:
-        result = "Неизвестная операция."
-    await message.answer(f"💱 Результат конвертации:\n{result}")
+        await message.answer("Неизвестная операция.")
     await state.clear()
 
-@dp.message(F.text == "Редактировать профиль")
-async def edit_profile(message: types.Message, state: FSMContext):
-    await state.set_state(ProfileForm.waiting_for_fullname)
-    await message.answer("Введи новое ФИО:", reply_markup=cancel_keyboard)
-
-@dp.message(F.text == "Отмена")
-async def cancel_action(message: types.Message, state: FSMContext):
-    await state.clear()
-    keyboard = owner_keyboard if message.from_user.id == OWNER_ID else main_keyboard
-    await message.answer("Действие отменено", reply_markup=keyboard)
-
-@dp.message(F.text == "Новый трек")
-async def new_track(message: types.Message, state: FSMContext):
-    profile = get_user_profile(message.from_user.id)
-    if not profile:
-        await state.set_state(ProfileForm.waiting_for_fullname)
-        await message.answer("Сначала заполни профиль. Введи ФИО:", reply_markup=cancel_keyboard)
-        return
-    await state.set_state(TrackForm.waiting_for_track)
-    await message.answer("Введи трек-номер:", reply_markup=cancel_keyboard)
-
-@dp.message(F.text == "📋 Мои треки")
-async def my_tracks(message: types.Message):
-    tracks = get_user_tracks(message.from_user.id)
-    if not tracks:
-        await message.answer("У тебя пока нет треков.", reply_markup=main_keyboard)
-        return
-    text = "📋 ТВОИ ТРЕКИ:\n\n"
-    for i, t in enumerate(tracks, 1):
-        dt = datetime.fromisoformat(t['created_at'])
-        date_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-        text += f"{i}. Трек: {t['track_number']}\n   Товар: {t['product_name']}\n   Цена за ед.: {t['price']:.2f} $\n   Кол-во: {t['quantity']} {t['quantity_type']}\n   Дата: {date_str}\n\n"
-    total = get_total_sum(message.from_user.id)
-    text += f"💰 **Общая сумма (цена × кол-во): {total:.2f} $**"
-    await message.answer(text, reply_markup=main_keyboard, parse_mode="Markdown")
-
-@dp.message(F.text == "Удалить трек")
-async def delete_track_start(message: types.Message, state: FSMContext):
-    tracks = get_user_tracks(message.from_user.id)
-    if not tracks:
-        await message.answer("Нет треков для удаления.", reply_markup=main_keyboard)
-        return
-    text = "🗑 Выбери номер трека для удаления:\n"
-    for i, t in enumerate(tracks, 1):
-        text += f"{i}. {t['track_number']} - {t['product_name']}\n"
-    await state.set_state(DeleteTrackForm.waiting_for_track_id)
-    await state.update_data(tracks=tracks)
-    await message.answer(text, reply_markup=cancel_keyboard)
-
-@dp.message(F.text == "📊 Мои треки (Excel)")
-async def export_to_excel(message: types.Message):
-    user_id = message.from_user.id
-    profile = get_user_profile(user_id)
-    if not profile:
-        await message.answer("Сначала заполните профиль (команда /start).")
-        return
-    full_name, phone = profile
-    tracks = get_user_tracks(user_id)
-    if not tracks:
-        await message.answer("У вас пока нет треков для выгрузки.")
-        return
-    output = create_user_excel(user_id, full_name, phone, tracks)
-    await message.answer_document(
-        BufferedInputFile(output.getvalue(), filename=f"my_tracks_{user_id}.xlsx"),
-        caption=f"📊 Ваши треки в Excel\nФИО: {full_name}\nТелефон: {phone}"
-    )
-
-@dp.message(F.text == "📦 Калькулятор доставки")
-async def calc_button(message: types.Message, state: FSMContext):
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Минск"), KeyboardButton(text="Лида")]],
-        resize_keyboard=True
-    )
-    await state.set_state(CalcForm.waiting_for_city)
-    await message.answer("Выберите город назначения:", reply_markup=keyboard)
-
-@dp.message(Command("calc"))
-async def calc_command(message: types.Message, state: FSMContext):
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Минск"), KeyboardButton(text="Лида")]],
-        resize_keyboard=True
-    )
-    await state.set_state(CalcForm.waiting_for_city)
-    await message.answer("Выберите город назначения:", reply_markup=keyboard)
-
-@dp.message(CalcForm.waiting_for_city)
-async def calc_weight(message: types.Message, state: FSMContext):
-    city = message.text
-    if city not in ["Минск", "Лида"]:
-        await message.answer("Пожалуйста, выберите город из кнопок.")
-        return
-    await state.update_data(city=city)
-    await state.set_state(CalcForm.waiting_for_weight)
-    await message.answer("Введите вес посылки в килограммах (например, 2.5):", reply_markup=cancel_keyboard)
-
-@dp.message(CalcForm.waiting_for_weight)
-async def calc_result(message: types.Message, state: FSMContext):
-    try:
-        weight = float(message.text.replace(',', '.'))
-    except:
-        await message.answer("❌ Пожалуйста, введите число (например, 2.5).", reply_markup=cancel_keyboard)
-        return
-    data = await state.get_data()
-    city = data.get("city")
-    cost = weight * CARGO_RATE
-    cost += weight * DELIVERY_MOSCOW_MINSK
-    if city == "Лида":
-        cost += weight * DELIVERY_MINSK_LIDA
-    cost += TRANSFER_FEE
-    cost += weight * EXTRA_RATE
-    cost += FIXED_COST
-    await message.answer(
-        f"📦 Примерная стоимость доставки до {city} для веса {weight:.2f} кг:\n"
-        f"💰 {cost:.2f} руб.\n\n"
-        f"* Карго (Китай→Москва): {CARGO_RATE:.2f} руб/кг\n"
-        f"* Москва→Минск: {DELIVERY_MOSCOW_MINSK:.2f} руб/кг\n"
-        f"{'* Минск→Лида: ' + str(DELIVERY_MINSK_LIDA) + ' руб/кг' if city == 'Лида' else ''}\n"
-        f"* Плата за передачу: {TRANSFER_FEE:.2f} руб\n"
-        f"* Доп. расходы: {EXTRA_RATE:.2f} руб/кг + {FIXED_COST:.2f} руб\n"
-        f"Точная стоимость может отличаться.",
-        reply_markup=main_keyboard
-    )
-    await state.clear()
-
-# === Кнопка завершить и отправить (владельцу: текст + Excel) ===
 @dp.message(F.text == "✅ Завершить и отправить")
 async def finish_and_send(message: types.Message):
-    user_id = message.from_user.id
-    profile = get_user_profile(user_id)
+    profile = get_user_profile(message.from_user.id)
     if not profile:
-        await message.answer("Сначала заполните профиль (команда /start).")
+        await message.answer("Сначала заполните профиль.")
+        return
+    tracks = get_user_tracks(message.from_user.id)
+    if not tracks:
+        await message.answer("Нет треков для отправки.")
         return
     full_name, phone = profile
-    tracks = get_user_tracks(user_id)
-    if not tracks:
-        await message.answer("У вас пока нет треков для отправки.")
-        return
-
-    # Текстовый список
-    text = f"📦 **ТРЕКИ ПОЛЬЗОВАТЕЛЯ**\n\n"
-    text += f"👤 **Участник:** {message.from_user.full_name} (@{message.from_user.username or 'нет'}) [ID: {user_id}]\n"
-    text += f"📞 **ФИО:** {full_name}\n"
-    text += f"📞 **Телефон:** {phone}\n"
-    text += f"─────────────────\n"
+    text = f"📦 ТРЕКИ ПОЛЬЗОВАТЕЛЯ\n👤 {message.from_user.full_name} (@{message.from_user.username or 'нет'})\n📞 {full_name}\n📞 {phone}\n\n"
     for i, t in enumerate(tracks, 1):
         dt = datetime.fromisoformat(t['created_at'])
         date_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-        text += f"{i}. **Трек:** `{t['track_number']}`\n"
-        text += f"   📦 **Товар:** {t['product_name']}\n"
-        text += f"   💰 **Цена за ед.:** {t['price']:.2f} $\n"
-        text += f"   📊 **Кол-во:** {t['quantity']} {t['quantity_type']}\n"
-        text += f"   🕒 **Дата:** {date_str}\n\n"
-    total = get_total_sum(user_id)
-    text += f"💰 **Общая сумма (цена × кол-во): {total:.2f} $**"
-
-    # Excel-файл
-    excel_file = create_user_excel(user_id, full_name, phone, tracks)
-
+        text += f"{i}. {t['track_number']} – {t['product_name']}\n   Цена: {t['price_cny']:.2f} CNY ≈ {t['price_usd']:.2f} USD\n   Кол-во: {t['quantity']} {t['quantity_type']} ({date_str})\n\n"
+    total_cny = get_total_sum_cny(message.from_user.id)
+    total_usd = get_total_sum_usd(message.from_user.id)
+    text += f"💰 Итого: {total_cny:.2f} CNY ≈ {total_usd:.2f} USD"
+    excel = create_user_excel(message.from_user.id, full_name, phone, tracks)
     try:
-        await bot.send_message(OWNER_ID, text, parse_mode="Markdown")
-        await bot.send_document(
-            OWNER_ID,
-            BufferedInputFile(excel_file.getvalue(), filename=f"tracks_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"),
-            caption=f"📊 Excel-файл для {full_name} (ID: {user_id})"
-        )
-        await message.answer("✅ Ваши треки успешно отправлены! Спасибо.")
+        await bot.send_message(OWNER_ID, text)
+        await bot.send_document(OWNER_ID, BufferedInputFile(excel.getvalue(), filename=f"tracks_{message.from_user.id}.xlsx"), caption=f"Excel-файл для {full_name}")
+        await message.answer("✅ Треки отправлены владельцу!")
     except Exception as e:
         await message.answer("⚠️ Не удалось отправить треки. Попробуйте позже.")
         print(f"Ошибка отправки владельцу: {e}")
 
-# === Массовая рассылка (только для владельца) ===
 @dp.message(F.text == "📢 Сделать рассылку")
 async def broadcast_start(message: types.Message, state: FSMContext):
     if message.from_user.id != OWNER_ID:
-        await message.answer("⛔ Эта функция доступна только владельцу.")
+        await message.answer("⛔ Только для владельца.")
         return
     await state.set_state(BroadcastForm.waiting_for_start_date)
-    await message.answer("Введите начальную дату в формате ГГГГ-ММ-ДД (например, 2026-04-01):", reply_markup=cancel_keyboard)
+    await message.answer("Введите начальную дату (ГГГГ-ММ-ДД):", reply_markup=cancel_keyboard)
 
 @dp.message(BroadcastForm.waiting_for_start_date)
 async def broadcast_start_date(message: types.Message, state: FSMContext):
@@ -468,9 +588,9 @@ async def broadcast_start_date(message: types.Message, state: FSMContext):
         start_date = datetime.strptime(message.text.strip(), "%Y-%m-%d")
         await state.update_data(start_date=start_date)
         await state.set_state(BroadcastForm.waiting_for_end_date)
-        await message.answer("Введите конечную дату в формате ГГГГ-ММ-ДД (например, 2026-04-10):")
-    except ValueError:
-        await message.answer("❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД")
+        await message.answer("Введите конечную дату (ГГГГ-ММ-ДД):")
+    except:
+        await message.answer("Неверный формат. Используйте ГГГГ-ММ-ДД")
 
 @dp.message(BroadcastForm.waiting_for_end_date)
 async def broadcast_end_date(message: types.Message, state: FSMContext):
@@ -481,9 +601,9 @@ async def broadcast_end_date(message: types.Message, state: FSMContext):
         end_date = datetime.strptime(message.text.strip(), "%Y-%m-%d")
         await state.update_data(end_date=end_date)
         await state.set_state(BroadcastForm.waiting_for_text)
-        await message.answer("Введите текст сообщения для рассылки:")
-    except ValueError:
-        await message.answer("❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД")
+        await message.answer("Введите текст рассылки:")
+    except:
+        await message.answer("Неверный формат даты.")
 
 @dp.message(BroadcastForm.waiting_for_text)
 async def broadcast_text(message: types.Message, state: FSMContext):
@@ -499,10 +619,10 @@ async def broadcast_text(message: types.Message, state: FSMContext):
     res = supabase.table("tracks").select("user_id").gte("created_at", start_datetime.isoformat()).lte("created_at", end_datetime.isoformat()).execute()
     user_ids = list(set(t["user_id"] for t in res.data))
     if not user_ids:
-        await message.answer("📭 Нет пользователей с треками в указанном диапазоне.")
+        await message.answer("Нет пользователей.")
         await state.clear()
         return
-    await message.answer(f"👥 Найдено {len(user_ids)} пользователей. Начинаю рассылку...")
+    await message.answer(f"👥 Найдено {len(user_ids)} пользователей. Рассылаю...")
     sent = 0
     for uid in user_ids:
         try:
@@ -511,101 +631,7 @@ async def broadcast_text(message: types.Message, state: FSMContext):
             await asyncio.sleep(0.05)
         except:
             pass
-    await message.answer(f"✅ Рассылка завершена. Отправлено {sent} сообщений.")
-    await state.clear()
-
-# === FSM обработчики (профиль, треки, удаление) ===
-@dp.message(ProfileForm.waiting_for_fullname)
-async def process_fullname(message: types.Message, state: FSMContext):
-    if message.text == "Отмена":
-        await cancel_action(message, state)
-        return
-    await state.update_data(fullname=message.text)
-    await state.set_state(ProfileForm.waiting_for_phone)
-    await message.answer("Введи номер телефона:", reply_markup=cancel_keyboard)
-
-@dp.message(ProfileForm.waiting_for_phone)
-async def process_phone(message: types.Message, state: FSMContext):
-    if message.text == "Отмена":
-        await cancel_action(message, state)
-        return
-    data = await state.get_data()
-    save_user_profile(message.from_user.id, message.from_user.username or "нет", data["fullname"], message.text)
-    await state.clear()
-    keyboard = owner_keyboard if message.from_user.id == OWNER_ID else main_keyboard
-    await message.answer("✅ Профиль сохранён!", reply_markup=keyboard)
-
-@dp.message(TrackForm.waiting_for_track)
-async def process_track(message: types.Message, state: FSMContext):
-    if message.text == "Отмена":
-        await cancel_action(message, state)
-        return
-    await state.update_data(track=message.text)
-    await state.set_state(TrackForm.waiting_for_product)
-    await message.answer("Введи наименование товара:", reply_markup=cancel_keyboard)
-
-@dp.message(TrackForm.waiting_for_product)
-async def process_product(message: types.Message, state: FSMContext):
-    if message.text == "Отмена":
-        await cancel_action(message, state)
-        return
-    await state.update_data(product=message.text)
-    await state.set_state(TrackForm.waiting_for_price)
-    await message.answer("Введи цену в долларах (например: 25):", reply_markup=cancel_keyboard)
-
-@dp.message(TrackForm.waiting_for_price)
-async def process_price(message: types.Message, state: FSMContext):
-    if message.text == "Отмена":
-        await cancel_action(message, state)
-        return
-    match = re.search(r"(\d+(?:[.,]\d+)?)", message.text)
-    if not match:
-        await message.answer("Введи число!", reply_markup=cancel_keyboard)
-        return
-    price = float(match.group(1).replace(",", "."))
-    await state.update_data(price=price)
-    await state.set_state(TrackForm.waiting_for_quantity_type)
-    await message.answer("Выбери: шт или пара", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="шт"), KeyboardButton(text="пара")]], resize_keyboard=True))
-
-@dp.message(TrackForm.waiting_for_quantity_type)
-async def process_quantity_type(message: types.Message, state: FSMContext):
-    if message.text not in ["шт", "пара"]:
-        await message.answer("Выбери кнопку: шт или пара")
-        return
-    await state.update_data(qtype=message.text)
-    await state.set_state(TrackForm.waiting_for_quantity)
-    await message.answer(f"Введи количество в {message.text}:", reply_markup=cancel_keyboard)
-
-@dp.message(TrackForm.waiting_for_quantity)
-async def process_quantity(message: types.Message, state: FSMContext):
-    if message.text == "Отмена":
-        await cancel_action(message, state)
-        return
-    try:
-        quantity = int(message.text)
-    except:
-        await message.answer("Введи целое число!", reply_markup=cancel_keyboard)
-        return
-    data = await state.get_data()
-    add_track(message.from_user.id, data["track"], data["product"], data["price"], data["qtype"], quantity)
-    await state.clear()
-    keyboard = owner_keyboard if message.from_user.id == OWNER_ID else main_keyboard
-    await message.answer("✅ Трек загружен! Вы можете продолжить добавлять треки или нажать «✅ Завершить и отправить», когда закончите.", reply_markup=keyboard)
-
-@dp.message(DeleteTrackForm.waiting_for_track_id)
-async def process_delete_track(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    tracks = data["tracks"]
-    try:
-        idx = int(message.text) - 1
-        if idx < 0 or idx >= len(tracks):
-            raise ValueError
-        track_id = tracks[idx]["id"]
-        delete_track(track_id, message.from_user.id)
-        keyboard = owner_keyboard if message.from_user.id == OWNER_ID else main_keyboard
-        await message.answer("✅ Трек удалён!", reply_markup=keyboard)
-    except:
-        await message.answer("Введи правильный номер!", reply_markup=cancel_keyboard)
+    await message.answer(f"✅ Отправлено {sent} сообщений.")
     await state.clear()
 
 # === Веб-сервер и самопинг ===
@@ -619,32 +645,53 @@ async def start_web():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8000)
     await site.start()
-    print("Веб-сервер запущен на порту 8000")
+    print("Веб-сервер на порту 8000")
 
 async def keep_alive():
-    url = os.getenv("RENDER_EXTERNAL_URL", "https://track-bot-fresh.onrender.com")  # замените на ваш URL
+    url = os.getenv("RENDER_EXTERNAL_URL", "https://track-bot-fresh.onrender.com")
     while True:
         await asyncio.sleep(600)
         try:
             async with aiohttp.ClientSession() as session:
                 await session.get(url, timeout=5)
-                print("Keep-alive ping sent")
-        except Exception as e:
-            print(f"Keep-alive error: {e}")
+                print("Ping")
+        except Exception:
+            pass
 
 async def run_bot():
     while True:
         try:
             await bot.delete_webhook(drop_pending_updates=True)
-            print("Вебхук сброшен, запускаем polling...")
             await dp.start_polling(bot)
         except Exception as e:
-            print(f"Бот упал с ошибкой: {e}. Перезапуск через 5 секунд...")
+            print(f"Бот упал: {e}. Перезапуск через 5с.")
             await asyncio.sleep(5)
 
 async def main():
     print("Бот запущен...")
     await asyncio.gather(keep_alive(), run_bot(), start_web())
+
+# Вспомогательная функция для получения курсов (для конвертера)
+async def get_exchange_rates():
+    # используем тот же код, что и раньше
+    apis = [
+        "https://api.exchangerate.host/latest?base=USD",
+        "https://api.exchangerate-api.com/v4/latest/USD"
+    ]
+    for url in apis:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        rates = data.get("rates", {})
+                        usd_to_byn = rates.get("BYN")
+                        usd_to_cny = rates.get("CNY")
+                        if usd_to_byn and usd_to_cny:
+                            return usd_to_byn, usd_to_cny
+        except:
+            continue
+    return None, None
 
 if __name__ == "__main__":
     asyncio.run(main())
