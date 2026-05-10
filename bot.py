@@ -32,7 +32,7 @@ main_keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="Новый трек")],
         [KeyboardButton(text="📋 Мои треки"), KeyboardButton(text="📊 Мои треки (Excel)")],
         [KeyboardButton(text="Редактировать профиль"), KeyboardButton(text="Удалить трек")],
-        [KeyboardButton(text="💱 Конвертер валют"), KeyboardButton(text="📦 Калькулятор доставки")],
+        [KeyboardButton(text="💰 Конвертер валют"), KeyboardButton(text="🚚 Калькулятор доставки")],
         [KeyboardButton(text="✅ Завершить и отправить"), KeyboardButton(text="🗑 Удалить все треки")]
     ],
     resize_keyboard=True
@@ -43,7 +43,7 @@ owner_keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="Новый трек")],
         [KeyboardButton(text="📋 Мои треки"), KeyboardButton(text="📊 Мои треки (Excel)")],
         [KeyboardButton(text="Редактировать профиль"), KeyboardButton(text="Удалить трек")],
-        [KeyboardButton(text="💱 Конвертер валют"), KeyboardButton(text="📦 Калькулятор доставки")],
+        [KeyboardButton(text="💰 Конвертер валют"), KeyboardButton(text="🚚 Калькулятор доставки")],
         [KeyboardButton(text="✅ Завершить и отправить"), KeyboardButton(text="🗑 Удалить все треки")],
         [KeyboardButton(text="📢 Сделать рассылку")]
     ],
@@ -154,44 +154,73 @@ def get_total_quantity(user_id):
     tracks = get_user_tracks(user_id)
     return sum(t["quantity"] for t in tracks)
 
-# === ПОЛУЧЕНИЕ КУРСОВ (единый надёжный способ) ===
-async def get_cny_to_usd_rate():
+# === ПОЛУЧЕНИЕ КУРСОВ (ИСПРАВЛЕНО) ===
+async def get_exchange_rates():
+    """
+    Возвращает кортеж (cny_to_usd, usd_to_byn, usd_to_cny)
+    Все значения - float, никогда не None
+    """
+    fallback_cny_to_usd = 0.14
+    fallback_usd_to_byn = 3.2
+    fallback_usd_to_cny = 7.14
+    
+    cny_to_usd = None
+    usd_to_byn = None
+    usd_to_cny = None
+    
     try:
         async with aiohttp.ClientSession() as session:
+            # Курс CNY -> USD
             async with session.get("https://api.exchangerate.host/latest?base=CNY&symbols=USD", timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    return data["rates"]["USD"]
-    except:
-        pass
-    return 0.14
-
-async def get_usd_to_byn_rate():
-    try:
-        async with aiohttp.ClientSession() as session:
+                    cny_to_usd = data.get("rates", {}).get("USD")
+            
+            # Курс USD -> BYN
             async with session.get("https://api.exchangerate.host/latest?base=USD&symbols=BYN", timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    return data["rates"]["BYN"]
-    except:
-        pass
-    return 3.2
+                    usd_to_byn = data.get("rates", {}).get("BYN")
+                    
+            # Если USD->BYN не получили, пробуем обратный курс
+            if usd_to_byn is None:
+                async with session.get("https://api.exchangerate.host/latest?base=BYN&symbols=USD", timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        usd_to_byn_inv = data.get("rates", {}).get("USD")
+                        if usd_to_byn_inv:
+                            usd_to_byn = 1 / usd_to_byn_inv
+            
+            # Курс USD -> CNY
+            if cny_to_usd is not None:
+                usd_to_cny = 1 / cny_to_usd
+            else:
+                async with session.get("https://api.exchangerate.host/latest?base=USD&symbols=CNY", timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        usd_to_cny = data.get("rates", {}).get("CNY")
+                        
+    except Exception as e:
+        print(f"Ошибка получения курсов: {e}")
+    
+    # Fallback
+    if cny_to_usd is None:
+        cny_to_usd = fallback_cny_to_usd
+    if usd_to_byn is None:
+        usd_to_byn = fallback_usd_to_byn
+    if usd_to_cny is None:
+        usd_to_cny = fallback_usd_to_cny
+    
+    return cny_to_usd, usd_to_byn, usd_to_cny
 
-# === КОНВЕРТЕР ДЛЯ КНОПКИ "Конвертер валют" ===
-async def get_all_rates():
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://api.exchangerate.host/latest?base=USD", timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    rates = data.get("rates", {})
-                    usd_to_byn = rates.get("BYN")
-                    usd_to_cny = rates.get("CNY")
-                    if usd_to_byn and usd_to_cny:
-                        return usd_to_byn, usd_to_cny
-    except:
-        pass
-    return None, None
+# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ТРЕКОВ ===
+async def get_cny_to_usd_rate():
+    cny_to_usd, _, _ = await get_exchange_rates()
+    return cny_to_usd
+
+async def get_usd_to_byn_rate():
+    _, usd_to_byn, _ = await get_exchange_rates()
+    return usd_to_byn
 
 # === СОЗДАНИЕ EXCEL ===
 def create_excel(tracks, full_name, phone, user_id):
@@ -256,7 +285,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     profile = get_user_profile(message.from_user.id)
     keyboard = owner_keyboard if message.from_user.id == OWNER_ID else main_keyboard
     if profile:
-        await message.answer(f"👋 С возвращением!\n\nФИО: {profile[0]}\nТелефон: {profile[1]}", reply_markup=keyboard)
+        await message.answer(f"✅ С возвращением!\n\nФИО: {profile[0]}\nТелефон: {profile[1]}", reply_markup=keyboard)
     else:
         await state.set_state(ProfileForm.waiting_for_fullname)
         await message.answer("Введи твоё ФИО:", reply_markup=cancel_keyboard)
@@ -336,10 +365,6 @@ async def process_price_cny(message: types.Message, state: FSMContext):
     price_cny = float(match.group(1).replace(",", "."))
     cny_to_usd = await get_cny_to_usd_rate()
     usd_to_byn = await get_usd_to_byn_rate()
-    if cny_to_usd is None or usd_to_byn is None:
-        await message.answer("Не удалось получить курсы, использую запасные: 1 CNY = 0.14 USD, 1 USD = 3.2 BYN")
-        cny_to_usd = 0.14
-        usd_to_byn = 3.2
     price_usd = round(price_cny * cny_to_usd, 2)
     price_byn = round(price_usd * usd_to_byn, 2)
     await state.update_data(price_cny=price_cny, price_usd=price_usd, price_byn=price_byn)
@@ -386,7 +411,7 @@ async def my_tracks(message: types.Message):
     if not tracks:
         await message.answer("У тебя пока нет треков.", reply_markup=main_keyboard)
         return
-    text = "📋 ТВОИ ТРЕКИ:\n\n"
+    text = "📦 ТВОИ ТРЕКИ:\n\n"
     for i, t in enumerate(tracks, 1):
         dt = datetime.fromisoformat(t['created_at'])
         text += f"{i}. {t['track_number']}\n   {t['product_name']}\n   Цена: {t['price_cny']:.2f} CNY = {t['price_usd']:.2f} USD = {t['price_byn']:.2f} BYN\n   Кол-во: {t['quantity']} {t['quantity_type']}\n   Дата: {dt.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -462,10 +487,10 @@ async def export_excel(message: types.Message):
             caption="📊 Ваши треки в Excel"
         )
     except Exception as e:
-        await message.answer(f"⚠️ Ошибка при создании Excel: {e}")
+        await message.answer(f"❌ Ошибка при создании Excel: {e}")
         print(f"Excel error: {e}")
 
-@dp.message(F.text == "📦 Калькулятор доставки")
+@dp.message(F.text == "🚚 Калькулятор доставки")
 async def calc_button(message: types.Message, state: FSMContext):
     keyboard = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Минск"), KeyboardButton(text="Лида")]], resize_keyboard=True)
     await state.set_state(CalcForm.waiting_for_city)
@@ -491,10 +516,10 @@ async def calc_result(message: types.Message, state: FSMContext):
     data = await state.get_data()
     city = data.get("city")
     cost = weight * 12.0 + weight * 1.6 + (weight * 0.8 if city == "Лида" else 0) + 10.0
-    await message.answer(f"📦 Примерная стоимость доставки до {city} для веса {weight:.2f} кг: {cost:.2f} руб.", reply_markup=main_keyboard)
+    await message.answer(f"🚚 Примерная стоимость доставки до {city} для веса {weight:.2f} кг: {cost:.2f} руб.", reply_markup=main_keyboard)
     await state.clear()
 
-@dp.message(F.text == "💱 Конвертер валют")
+@dp.message(F.text == "💰 Конвертер валют")
 async def currency_button(message: types.Message, state: FSMContext):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="CNY → USD → BYN", callback_data="convert_cny_to_all")],
@@ -522,15 +547,15 @@ async def process_currency_amount(message: types.Message, state: FSMContext):
     except:
         await message.answer("Введите число!")
         return
+    
     data = await state.get_data()
     action = data.get('currency_action')
-    usd_to_byn, usd_to_cny = await get_all_rates()
-    if usd_to_byn is None or usd_to_cny is None:
-        await message.answer("❌ Не удалось получить курсы. Попробуйте позже.")
-        await state.clear()
-        return
+    
+    # Получаем курсы
+    cny_to_usd, usd_to_byn, usd_to_cny = await get_exchange_rates()
+    
     if action == "convert_cny_to_all":
-        usd = amount / usd_to_cny
+        usd = amount * cny_to_usd
         byn = usd * usd_to_byn
         await message.answer(f"{amount:.2f} CNY = {usd:.2f} USD = {byn:.2f} BYN")
     elif action == "convert_usd_to_byn":
@@ -541,6 +566,7 @@ async def process_currency_amount(message: types.Message, state: FSMContext):
         await message.answer(f"{amount:.2f} BYN = {usd:.2f} USD")
     else:
         await message.answer("Неизвестная операция.")
+    
     await state.clear()
 
 @dp.message(F.text == "✅ Завершить и отправить")
@@ -555,7 +581,7 @@ async def finish_and_send(message: types.Message):
         await message.answer("Профиль не найден.")
         return
     full_name, phone = profile
-    text = f"📦 ТРЕКИ ПОЛЬЗОВАТЕЛЯ\n👤 {message.from_user.full_name} (@{message.from_user.username or 'нет'})\n📞 {full_name}\n📞 {phone}\n\n"
+    text = f"📦 ТРЕКИ ПОЛЬЗОВАТЕЛЯ\n👤 {message.from_user.full_name} (@{message.from_user.username or 'нет'})\n📝 {full_name}\n📞 {phone}\n\n"
     for i, t in enumerate(tracks, 1):
         dt = datetime.fromisoformat(t['created_at'])
         text += f"{i}. {t['track_number']} – {t['product_name']}\n   Цена: {t['price_cny']:.2f} CNY ≈ {t['price_usd']:.2f} USD ≈ {t['price_byn']:.2f} BYN\n   Кол-во: {t['quantity']} {t['quantity_type']} ({dt.strftime('%Y-%m-%d %H:%M:%S')})\n\n"
@@ -569,7 +595,7 @@ async def finish_and_send(message: types.Message):
         await bot.send_document(OWNER_ID, BufferedInputFile(excel_file.getvalue(), filename=f"tracks_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"), caption=f"Excel-файл от {full_name}")
         await message.answer("✅ Ваши треки отправлены владельцу!")
     except Exception as e:
-        await message.answer(f"⚠️ Ошибка при отправке: {e}")
+        await message.answer(f"❌ Ошибка при отправке: {e}")
         print(f"Send error: {e}")
 
 @dp.message(F.text == "📢 Сделать рассылку")
@@ -623,8 +649,17 @@ async def broadcast_text(message: types.Message, state: FSMContext):
         await message.answer("Нет пользователей с треками в указанном диапазоне.")
         await state.clear()
         return
-    await message.answer(f"👥 Найдено {len(user_ids)} пользователей. Рассылаю...")
+    await message.answer(f"📢 Найдено {len(user_ids)} пользователей. Рассылаю...")
     sent = 0
     for uid in user_ids:
         try:
             await bot.send_message(uid, f"📢 {text}")
+            sent += 1
+            await asyncio.sleep(0.05)
+        except:
+            pass
+    await message.answer(f"✅ Отправлено {sent} сообщений.")
+    await state.clear()
+
+# === ВЕБ-СЕРВЕР И САМОПИНГ ===
+async def handle
