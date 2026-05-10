@@ -164,7 +164,7 @@ async def get_cny_to_usd_rate():
                     return data["rates"]["USD"]
     except:
         pass
-    return 0.14  # fallback
+    return 0.14
 
 async def get_usd_to_byn_rate():
     try:
@@ -175,12 +175,7 @@ async def get_usd_to_byn_rate():
                     return data["rates"]["BYN"]
     except:
         pass
-    return 3.2  # fallback
-
-async def get_cny_to_usd_and_usd_to_byn():
-    cny_to_usd = await get_cny_to_usd_rate()
-    usd_to_byn = await get_usd_to_byn_rate()
-    return cny_to_usd, usd_to_byn
+    return 3.2
 
 # === КОНВЕРТЕР ДЛЯ КНОПКИ "Конвертер валют" ===
 async def get_all_rates():
@@ -198,7 +193,7 @@ async def get_all_rates():
         pass
     return None, None
 
-# === СОЗДАНИЕ EXCEL (С НУМЕРАЦИЕЙ, КОЛИЧЕСТВОМ ТРЕКОВ И ОБЩИМ КОЛИЧЕСТВОМ ЕДИНИЦ) ===
+# === СОЗДАНИЕ EXCEL ===
 def create_excel(tracks, full_name, phone, user_id):
     wb = Workbook()
     ws = wb.active
@@ -633,49 +628,3 @@ async def broadcast_text(message: types.Message, state: FSMContext):
     for uid in user_ids:
         try:
             await bot.send_message(uid, f"📢 {text}")
-            sent += 1
-            await asyncio.sleep(0.05)
-        except:
-            pass
-    await message.answer(f"✅ Отправлено {sent} сообщений.")
-    await state.clear()
-
-# === ВЕБ-СЕРВЕР И САМОПИНГ ===
-async def handle_web(request):
-    return web.Response(text="Bot is running")
-
-async def start_web():
-    app = web.Application()
-    app.router.add_get("/", handle_web)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8000)
-    await site.start()
-    print("Веб-сервер на порту 8000")
-
-async def keep_alive():
-    url = os.getenv("RENDER_EXTERNAL_URL", "https://track-bot-fresh.onrender.com")
-    while True:
-        await asyncio.sleep(600)
-        try:
-            async with aiohttp.ClientSession() as session:
-                await session.get(url, timeout=5)
-                print("Ping")
-        except Exception:
-            pass
-
-async def run_bot():
-    while True:
-        try:
-            await bot.delete_webhook(drop_pending_updates=True)
-            await dp.start_polling(bot)
-        except Exception as e:
-            print(f"Бот упал: {e}. Перезапуск через 5с.")
-            await asyncio.sleep(5)
-
-async def main():
-    print("Бот запущен...")
-    await asyncio.gather(keep_alive(), run_bot(), start_web())
-
-if __name__ == "__main__":
-    asyncio.run(main())
