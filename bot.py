@@ -140,49 +140,40 @@ def delete_all_tracks(user_id):
 
 def get_total_sum_cny(user_id):
     tracks = get_user_tracks(user_id)
-    return round(sum(t["price_cny"] * t["quantity"] for t in tracks), 2)
+    return round(sum(t["price_cny"] * t["quantity"] for t in tracks), 2) if tracks else 0
 
 def get_total_sum_usd(user_id):
     tracks = get_user_tracks(user_id)
-    return round(sum(t["price_usd"] * t["quantity"] for t in tracks), 2)
+    return round(sum(t["price_usd"] * t["quantity"] for t in tracks), 2) if tracks else 0
 
 def get_total_sum_byn(user_id):
     tracks = get_user_tracks(user_id)
-    return round(sum(t["price_byn"] * t["quantity"] for t in tracks), 2)
+    return round(sum(t["price_byn"] * t["quantity"] for t in tracks), 2) if tracks else 0
 
 def get_total_quantity(user_id):
     tracks = get_user_tracks(user_id)
-    return sum(t["quantity"] for t in tracks)
+    return sum(t["quantity"] for t in tracks) if tracks else 0
 
-# === ПОЛУЧЕНИЕ КУРСОВ (ИСПРАВЛЕНО) ===
+# === ПОЛУЧЕНИЕ КУРСОВ ===
 async def get_exchange_rates():
-    """
-    Возвращает кортеж (cny_to_usd, usd_to_byn, usd_to_cny)
-    Все значения - float, никогда не None
-    """
     fallback_cny_to_usd = 0.14
     fallback_usd_to_byn = 3.2
-    fallback_usd_to_cny = 7.14
     
     cny_to_usd = None
     usd_to_byn = None
-    usd_to_cny = None
     
     try:
         async with aiohttp.ClientSession() as session:
-            # Курс CNY -> USD
             async with session.get("https://api.exchangerate.host/latest?base=CNY&symbols=USD", timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     cny_to_usd = data.get("rates", {}).get("USD")
             
-            # Курс USD -> BYN
             async with session.get("https://api.exchangerate.host/latest?base=USD&symbols=BYN", timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     usd_to_byn = data.get("rates", {}).get("BYN")
                     
-            # Если USD->BYN не получили, пробуем обратный курс
             if usd_to_byn is None:
                 async with session.get("https://api.exchangerate.host/latest?base=BYN&symbols=USD", timeout=10) as resp:
                     if resp.status == 200:
@@ -190,36 +181,22 @@ async def get_exchange_rates():
                         usd_to_byn_inv = data.get("rates", {}).get("USD")
                         if usd_to_byn_inv:
                             usd_to_byn = 1 / usd_to_byn_inv
-            
-            # Курс USD -> CNY
-            if cny_to_usd is not None:
-                usd_to_cny = 1 / cny_to_usd
-            else:
-                async with session.get("https://api.exchangerate.host/latest?base=USD&symbols=CNY", timeout=10) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        usd_to_cny = data.get("rates", {}).get("CNY")
-                        
     except Exception as e:
         print(f"Ошибка получения курсов: {e}")
     
-    # Fallback
     if cny_to_usd is None:
         cny_to_usd = fallback_cny_to_usd
     if usd_to_byn is None:
         usd_to_byn = fallback_usd_to_byn
-    if usd_to_cny is None:
-        usd_to_cny = fallback_usd_to_cny
     
-    return cny_to_usd, usd_to_byn, usd_to_cny
+    return cny_to_usd, usd_to_byn
 
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ТРЕКОВ ===
 async def get_cny_to_usd_rate():
-    cny_to_usd, _, _ = await get_exchange_rates()
+    cny_to_usd, _ = await get_exchange_rates()
     return cny_to_usd
 
 async def get_usd_to_byn_rate():
-    _, usd_to_byn, _ = await get_exchange_rates()
+    _, usd_to_byn = await get_exchange_rates()
     return usd_to_byn
 
 # === СОЗДАНИЕ EXCEL ===
@@ -239,8 +216,8 @@ def create_excel(tracks, full_name, phone, user_id):
         ws.cell(row=row_idx, column=2, value=t["track_number"])
         ws.cell(row=row_idx, column=3, value=t["product_name"])
         ws.cell(row=row_idx, column=4, value=float(t["price_cny"]))
-        ws.cell(row=row_idx, column=5, value=float(t["price_usd"]))
-        ws.cell(row=row_idx, column=6, value=float(t["price_byn"]))
+        ws.cell(row=row_idx, column=5, value=float(t["price_usd"]) if t["price_usd"] else 0)
+        ws.cell(row=row_idx, column=6, value=float(t["price_byn"]) if t["price_byn"] else 0)
         ws.cell(row=row_idx, column=7, value=int(t["quantity"]))
         ws.cell(row=row_idx, column=8, value=t["quantity_type"])
         dt = datetime.fromisoformat(t['created_at'])
@@ -414,7 +391,9 @@ async def my_tracks(message: types.Message):
     text = "📦 ТВОИ ТРЕКИ:\n\n"
     for i, t in enumerate(tracks, 1):
         dt = datetime.fromisoformat(t['created_at'])
-        text += f"{i}. {t['track_number']}\n   {t['product_name']}\n   Цена: {t['price_cny']:.2f} CNY = {t['price_usd']:.2f} USD = {t['price_byn']:.2f} BYN\n   Кол-во: {t['quantity']} {t['quantity_type']}\n   Дата: {dt.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        price_usd = t.get('price_usd', 0) or 0
+        price_byn = t.get('price_byn', 0) or 0
+        text += f"{i}. {t['track_number']}\n   {t['product_name']}\n   Цена: {t['price_cny']:.2f} CNY = {price_usd:.2f} USD = {price_byn:.2f} BYN\n   Кол-во: {t['quantity']} {t['quantity_type']}\n   Дата: {dt.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     total_cny = get_total_sum_cny(message.from_user.id)
     total_usd = get_total_sum_usd(message.from_user.id)
     total_byn = get_total_sum_byn(message.from_user.id)
@@ -551,8 +530,7 @@ async def process_currency_amount(message: types.Message, state: FSMContext):
     data = await state.get_data()
     action = data.get('currency_action')
     
-    # Получаем курсы
-    cny_to_usd, usd_to_byn, usd_to_cny = await get_exchange_rates()
+    cny_to_usd, usd_to_byn = await get_exchange_rates()
     
     if action == "convert_cny_to_all":
         usd = amount * cny_to_usd
@@ -584,7 +562,9 @@ async def finish_and_send(message: types.Message):
     text = f"📦 ТРЕКИ ПОЛЬЗОВАТЕЛЯ\n👤 {message.from_user.full_name} (@{message.from_user.username or 'нет'})\n📝 {full_name}\n📞 {phone}\n\n"
     for i, t in enumerate(tracks, 1):
         dt = datetime.fromisoformat(t['created_at'])
-        text += f"{i}. {t['track_number']} – {t['product_name']}\n   Цена: {t['price_cny']:.2f} CNY ≈ {t['price_usd']:.2f} USD ≈ {t['price_byn']:.2f} BYN\n   Кол-во: {t['quantity']} {t['quantity_type']} ({dt.strftime('%Y-%m-%d %H:%M:%S')})\n\n"
+        price_usd = t.get('price_usd', 0) or 0
+        price_byn = t.get('price_byn', 0) or 0
+        text += f"{i}. {t['track_number']} – {t['product_name']}\n   Цена: {t['price_cny']:.2f} CNY ≈ {price_usd:.2f} USD ≈ {price_byn:.2f} BYN\n   Кол-во: {t['quantity']} {t['quantity_type']} ({dt.strftime('%Y-%m-%d %H:%M:%S')})\n\n"
     total_cny = get_total_sum_cny(user_id)
     total_usd = get_total_sum_usd(user_id)
     total_byn = get_total_sum_byn(user_id)
@@ -662,4 +642,34 @@ async def broadcast_text(message: types.Message, state: FSMContext):
     await state.clear()
 
 # === ВЕБ-СЕРВЕР И САМОПИНГ ===
-async def handle
+async def handle_web(request):
+    return web.Response(text="Bot is running")
+
+async def start_web():
+    app = web.Application()
+    app.router.add_get("/", handle_web)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 8000)
+    await site.start()
+    print("Веб-сервер на порту 8000")
+
+async def keep_alive():
+    url = os.getenv("RENDER_EXTERNAL_URL", "https://track-bot-fresh.onrender.com")
+    while True:
+        await asyncio.sleep(600)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await session.get(url, timeout=5)
+                print("Ping")
+        except Exception:
+            pass
+
+async def run_bot():
+    while True:
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            await dp.start_polling(bot)
+        except Exception as e:
+            print(f"Бот упал: {e}. Перезапуск через 5с.")
+            await asyncio.sleep(5)
