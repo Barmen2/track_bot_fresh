@@ -147,28 +147,46 @@ def get_total_quantity(user_id):
     tracks = get_user_tracks(user_id)
     return sum(t["quantity"] for t in tracks) if tracks else 0
 
-# === КУРСЫ ===
+# === ПОЛУЧЕНИЕ КУРСОВ ОТ НАЦИОНАЛЬНОГО БАНКА БЕЛАРУСИ ===
 async def get_exchange_rates():
-    cny_to_usd, usd_to_byn = 0.14, 3.2
+    # Значения по умолчанию на случай ошибки API
+    usd_to_byn = 3.2   # будет заменено на официальный курс
+    cny_to_usd = 0.14  # будет заменено через кросс-курс
+
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get("https://api.exchangerate.host/latest?base=CNY&symbols=USD", timeout=10) as resp:
+            # 1. Курс USD/BYN от Нацбанка
+            async with session.get("https://api.nbrb.by/exrates/rates/USD?parammode=2", timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    cny_to_usd = data.get("rates", {}).get("USD") or cny_to_usd
-            async with session.get("https://api.exchangerate.host/latest?base=USD&symbols=BYN", timeout=10) as resp:
+                    usd_to_byn = data.get("Cur_OfficialRate")
+                    if usd_to_byn:
+                        print(f"Курс USD/BYN от Нацбанка: {usd_to_byn}")
+                    else:
+                        print("Не удалось получить курс USD/BYN")
+                else:
+                    print(f"Ошибка получения курса USD/BYN: {resp.status}")
+
+            # 2. Курс CNY/BYN от Нацбанка
+            async with session.get("https://api.nbrb.by/exrates/rates/CNY?parammode=2", timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    usd_to_byn = data.get("rates", {}).get("BYN") or usd_to_byn
-            if usd_to_byn is None:
-                async with session.get("https://api.exchangerate.host/latest?base=BYN&symbols=USD", timeout=10) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        inv = data.get("rates", {}).get("USD")
-                        if inv:
-                            usd_to_byn = 1 / inv
-    except:
-        pass
+                    cny_to_byn = data.get("Cur_OfficialRate")
+                    if cny_to_byn and usd_to_byn:
+                        # Вычисляем кросс-курс CNY к USD
+                        cny_to_usd = cny_to_byn / usd_to_byn
+                        print(f"Курс CNY/BYN: {cny_to_byn}, USD/BYN: {usd_to_byn}, кросс CNY/USD: {cny_to_usd}")
+                else:
+                    print(f"Ошибка получения курса CNY/BYN: {resp.status}")
+    except Exception as e:
+        print(f"Ошибка при обращении к API Нацбанка: {e}")
+
+    # Если что-то пошло не так, используем значения по умолчанию
+    if not usd_to_byn:
+        usd_to_byn = 3.2
+    if not cny_to_usd:
+        cny_to_usd = 0.14
+
     return cny_to_usd, usd_to_byn
 
 async def get_cny_to_usd_rate():
@@ -291,7 +309,7 @@ async def process_product(message: types.Message, state: FSMContext):
         return
     await state.update_data(product=message.text)
     await state.set_state(TrackForm.waiting_for_price_cny)
-    await message.answer("Введи цену в **юанях (CNY)**:\n(бот пересчитает в USD и BYN)", reply_markup=cancel_keyboard, parse_mode="Markdown")
+    await message.answer("Введи цену в **юанях (CNY)**:\n(бот пересчитает в USD и BYN по курсу Нацбанка)", reply_markup=cancel_keyboard, parse_mode="Markdown")
 
 @dp.message(TrackForm.waiting_for_price_cny)
 async def process_price_cny(message: types.Message, state: FSMContext):
