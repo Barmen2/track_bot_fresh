@@ -151,53 +151,58 @@ def get_total_quantity(user_id):
 async def get_rates_from_nbrb():
     """
     Возвращает (usd_to_byn, cny_to_byn) - официальные курсы НБРБ.
-    Если не удалось получить, использует резервные значения.
+    Корректно обрабатывает масштаб (Cur_Scale) валют.
     """
     usd_to_byn = None
     cny_to_byn = None
-    # Резервные курсы (примерные, на случай ошибки)
     fallback_usd = 3.2
-    fallback_cny = 0.45  # примерный курс CNY/BYN (3.2 / 7.1 ≈ 0.45)
+    fallback_cny = 0.45
+
     try:
         async with aiohttp.ClientSession() as session:
-            # Запрашиваем курс USD
+            # Запрашиваем курс USD (Cur_Scale обычно 1)
             async with session.get("https://api.nbrb.by/exrates/rates/USD?parammode=2", timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     usd_to_byn = data.get("Cur_OfficialRate")
                     print(f"Курс USD/BYN от Нацбанка: {usd_to_byn}")
-            # Запрашиваем курс CNY
+
+            # Запрашиваем курс CNY (Cur_Scale может быть 10)
             async with session.get("https://api.nbrb.by/exrates/rates/CNY?parammode=2", timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    cny_to_byn = data.get("Cur_OfficialRate")
-                    print(f"Курс CNY/BYN от Нацбанка: {cny_to_byn}")
+                    # Извлекаем официальный курс
+                    official_rate = data.get("Cur_OfficialRate")
+                    # Извлекаем масштаб (количество единиц валюты)
+                    scale = data.get("Cur_Scale", 1)
+                    cny_to_byn = official_rate / scale
+                    print(f"Курс CNY/BYN от Нацбанка: (официальный курс {official_rate} за {scale} CNY) -> {cny_to_byn} за 1 CNY")
     except Exception as e:
         print(f"Ошибка получения курсов от Нацбанка: {e}")
-    
+
     if usd_to_byn is None:
         usd_to_byn = fallback_usd
         print(f"Используем резервный курс USD/BYN: {usd_to_byn}")
     if cny_to_byn is None:
         cny_to_byn = fallback_cny
         print(f"Используем резервный курс CNY/BYN: {cny_to_byn}")
-    
+
     return usd_to_byn, cny_to_byn
 
-async def get_cny_to_usd_rate():
-    """Возвращает курс CNY к USD (через BYN)"""
-    usd_to_byn, cny_to_byn = await get_rates_from_nbrb()
-    if usd_to_byn and cny_to_byn:
-        return cny_to_byn / usd_to_byn
-    return 0.14  # резерв
+# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ КУРСОВ ===
+async def get_cny_to_byn_rate():
+    _, cny_to_byn = await get_rates_from_nbrb()
+    return cny_to_byn
 
 async def get_usd_to_byn_rate():
     usd_to_byn, _ = await get_rates_from_nbrb()
     return usd_to_byn
 
-async def get_cny_to_byn_rate():
-    _, cny_to_byn = await get_rates_from_nbrb()
-    return cny_to_byn
+async def get_cny_to_usd_rate():
+    usd_to_byn, cny_to_byn = await get_rates_from_nbrb()
+    if usd_to_byn and cny_to_byn:
+        return cny_to_byn / usd_to_byn
+    return 0.14
 
 # === EXCEL ===
 def create_excel(tracks, full_name, phone, user_id):
@@ -500,7 +505,9 @@ async def process_currency_amount(message: types.Message, state: FSMContext):
         return
     data = await state.get_data()
     action = data.get("conv_action")
+    # Получаем курсы от Нацбанка
     usd_to_byn, cny_to_byn = await get_rates_from_nbrb()
+    # Рассчитываем кросс-курс CNY к USD через BYN
     cny_to_usd = cny_to_byn / usd_to_byn if usd_to_byn else 0.14
     if action == "cny_all":
         byn = amount * cny_to_byn
