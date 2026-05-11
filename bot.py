@@ -147,11 +147,10 @@ def get_total_quantity(user_id):
     tracks = get_user_tracks(user_id)
     return sum(t["quantity"] for t in tracks) if tracks else 0
 
-# === ПОЛУЧЕНИЕ КУРСОВ ОТ НАЦБАНКА БЕЛАРУСИ ===
+# === ПОЛУЧЕНИЕ КУРСОВ ОТ НАЦБАНКА БЕЛАРУСИ (с учётом масштаба) ===
 async def get_rates_from_nbrb():
     """
     Возвращает (usd_to_byn, cny_to_byn) - официальные курсы НБРБ.
-    Корректно обрабатывает масштаб (Cur_Scale) валют.
     """
     usd_to_byn = None
     cny_to_byn = None
@@ -160,49 +159,44 @@ async def get_rates_from_nbrb():
 
     try:
         async with aiohttp.ClientSession() as session:
-            # Запрашиваем курс USD (Cur_Scale обычно 1)
+            # Курс USD (обычно масштаб 1)
             async with session.get("https://api.nbrb.by/exrates/rates/USD?parammode=2", timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     usd_to_byn = data.get("Cur_OfficialRate")
                     print(f"Курс USD/BYN от Нацбанка: {usd_to_byn}")
 
-            # Запрашиваем курс CNY (Cur_Scale может быть 10)
+            # Курс CNY (масштаб может быть 10)
             async with session.get("https://api.nbrb.by/exrates/rates/CNY?parammode=2", timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    # Извлекаем официальный курс
                     official_rate = data.get("Cur_OfficialRate")
-                    # Извлекаем масштаб (количество единиц валюты)
                     scale = data.get("Cur_Scale", 1)
                     cny_to_byn = official_rate / scale
-                    print(f"Курс CNY/BYN от Нацбанка: (официальный курс {official_rate} за {scale} CNY) -> {cny_to_byn} за 1 CNY")
+                    print(f"Курс CNY/BYN от Нацбанка (за 1 CNY): {cny_to_byn} (официальный {official_rate} за {scale} CNY)")
     except Exception as e:
         print(f"Ошибка получения курсов от Нацбанка: {e}")
 
     if usd_to_byn is None:
         usd_to_byn = fallback_usd
-        print(f"Используем резервный курс USD/BYN: {usd_to_byn}")
+        print(f"Используем резервный USD/BYN: {usd_to_byn}")
     if cny_to_byn is None:
         cny_to_byn = fallback_cny
-        print(f"Используем резервный курс CNY/BYN: {cny_to_byn}")
+        print(f"Используем резервный CNY/BYN: {cny_to_byn}")
 
     return usd_to_byn, cny_to_byn
 
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ КУРСОВ ===
-async def get_cny_to_byn_rate():
-    _, cny_to_byn = await get_rates_from_nbrb()
-    return cny_to_byn
+async def get_cny_to_usd_rate():
+    usd_to_byn, cny_to_byn = await get_rates_from_nbrb()
+    return cny_to_byn / usd_to_byn if usd_to_byn else 0.14
 
 async def get_usd_to_byn_rate():
     usd_to_byn, _ = await get_rates_from_nbrb()
     return usd_to_byn
 
-async def get_cny_to_usd_rate():
-    usd_to_byn, cny_to_byn = await get_rates_from_nbrb()
-    if usd_to_byn and cny_to_byn:
-        return cny_to_byn / usd_to_byn
-    return 0.14
+async def get_cny_to_byn_rate():
+    _, cny_to_byn = await get_rates_from_nbrb()
+    return cny_to_byn
 
 # === EXCEL ===
 def create_excel(tracks, full_name, phone, user_id):
@@ -328,9 +322,7 @@ async def process_price_cny(message: types.Message, state: FSMContext):
         await message.answer("Введи число!", reply_markup=cancel_keyboard)
         return
     price_cny = float(match.group(1).replace(",", "."))
-    # Получаем курсы от Нацбанка
     usd_to_byn, cny_to_byn = await get_rates_from_nbrb()
-    # Пересчёт
     price_byn = round(price_cny * cny_to_byn, 2)
     price_usd = round(price_byn / usd_to_byn, 2)
     await state.update_data(price_cny=price_cny, price_usd=price_usd, price_byn=price_byn)
@@ -471,8 +463,25 @@ async def calc_result(message: types.Message, state: FSMContext):
         await message.answer("Введите число!")
         return
     data = await state.get_data()
-    city = data["city"]
-    cost = weight * 12.0 + weight * 1.6 + (weight * 0.8 if city == "Лида" else 0) + 10.0
+    city = data.get("city")
+    
+    # Все параметры доставки из переменных окружения (можно менять в панели Render)
+    delivery_rate = float(os.getenv("DELIVERY_RATE", "12.0"))           # руб/кг базовая доставка
+    handling_rate = float(os.getenv("HANDLING_RATE", "1.6"))           # руб/кг обработка
+    lida_extra_rate = float(os.getenv("LIDA_EXTRA_RATE", "0.8"))       # руб/кг доплата за Лиду
+    fixed_fee = float(os.getenv("FIXED_FEE", "10.0"))                  # руб фиксированный сбор
+    # Дополнительно: доставка Москва-Минск (по умолчанию 0, но можно изменить)
+    moscow_delivery_rate = float(os.getenv("DELIVERY_MOSCOW_MINSK", "0.0"))
+    
+    # Если вдруг есть старая переменная DELIVERY_MINSK_LIDA, используем её как lida_extra_rate
+    if os.getenv("DELIVERY_MINSK_LIDA"):
+        lida_extra_rate = float(os.getenv("DELIVERY_MINSK_LIDA"))
+    
+    # Расчёт
+    cost = weight * delivery_rate + weight * handling_rate + (weight * lida_extra_rate if city == "Лида" else 0) + fixed_fee
+    # Если нужна доставка из Москвы в Минск, можно добавить условие, но сейчас город только Минск и Лида
+    # Для простоты пока оставляем как есть.
+    
     await message.answer(f"🚚 Доставка до {city}: {cost:.2f} руб.", reply_markup=main_keyboard)
     await state.clear()
 
@@ -505,9 +514,7 @@ async def process_currency_amount(message: types.Message, state: FSMContext):
         return
     data = await state.get_data()
     action = data.get("conv_action")
-    # Получаем курсы от Нацбанка
     usd_to_byn, cny_to_byn = await get_rates_from_nbrb()
-    # Рассчитываем кросс-курс CNY к USD через BYN
     cny_to_usd = cny_to_byn / usd_to_byn if usd_to_byn else 0.14
     if action == "cny_all":
         byn = amount * cny_to_byn
