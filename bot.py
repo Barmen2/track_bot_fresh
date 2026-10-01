@@ -11,7 +11,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile
 from supabase import create_client, Client
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment
+from openpyxl.styles import Font, Alignment, Border, Side
 import aiohttp
 from aiohttp import web
 
@@ -57,6 +57,7 @@ group_keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(tex
 class ProfileForm(StatesGroup):
     waiting_for_fullname = State()
     waiting_for_phone = State()
+    waiting_for_address = State()
 
 class TrackForm(StatesGroup):
     waiting_for_track = State()
@@ -81,27 +82,27 @@ class BroadcastForm(StatesGroup):
     waiting_for_text = State()
 
 class ConfirmDeleteAllForm(StatesGroup):
-    waiting_for_confirmation = State()
-
-# === БАЗА ДАННЫХ ===
+    waiting_for_confirmation = State()# === БАЗА ДАННЫХ ===
 def get_msk_time():
     return datetime.now(timezone.utc) + timedelta(hours=3)
 
 def get_user_profile(user_id):
     try:
-        res = supabase.table("users").select("full_name, phone").eq("user_id", user_id).execute()
+        res = supabase.table("users").select("full_name, phone, address").eq("user_id", user_id).execute()
         if res.data:
-            return res.data[0]["full_name"], res.data[0]["phone"]
+            row = res.data[0]
+            return row.get("full_name"), row.get("phone"), row.get("address")
         return None
     except:
         return None
 
-def save_user_profile(user_id, username, full_name, phone):
+def save_user_profile(user_id, username, full_name, phone, address):
     supabase.table("users").upsert({
         "user_id": user_id,
         "username": username,
         "full_name": full_name,
         "phone": phone,
+        "address": address,
         "created_at": get_msk_time().isoformat()
     }).execute()
 
@@ -147,11 +148,8 @@ def get_total_quantity(user_id):
     tracks = get_user_tracks(user_id)
     return sum(t["quantity"] for t in tracks) if tracks else 0
 
-# === ПОЛУЧЕНИЕ КУРСОВ ОТ НАЦБАНКА БЕЛАРУСИ (с учётом масштаба) ===
+# === КУРСЫ ОТ НАЦБАНКА ===
 async def get_rates_from_nbrb():
-    """
-    Возвращает (usd_to_byn, cny_to_byn) - официальные курсы НБРБ.
-    """
     usd_to_byn = None
     cny_to_byn = None
     fallback_usd = 3.2
@@ -159,30 +157,23 @@ async def get_rates_from_nbrb():
 
     try:
         async with aiohttp.ClientSession() as session:
-            # Курс USD (обычно масштаб 1)
             async with session.get("https://api.nbrb.by/exrates/rates/USD?parammode=2", timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     usd_to_byn = data.get("Cur_OfficialRate")
-                    print(f"Курс USD/BYN от Нацбанка: {usd_to_byn}")
-
-            # Курс CNY (масштаб может быть 10)
             async with session.get("https://api.nbrb.by/exrates/rates/CNY?parammode=2", timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     official_rate = data.get("Cur_OfficialRate")
                     scale = data.get("Cur_Scale", 1)
                     cny_to_byn = official_rate / scale
-                    print(f"Курс CNY/BYN от Нацбанка (за 1 CNY): {cny_to_byn} (официальный {official_rate} за {scale} CNY)")
     except Exception as e:
-        print(f"Ошибка получения курсов от Нацбанка: {e}")
+        print(f"Ошибка курсов: {e}")
 
     if usd_to_byn is None:
         usd_to_byn = fallback_usd
-        print(f"Используем резервный USD/BYN: {usd_to_byn}")
     if cny_to_byn is None:
         cny_to_byn = fallback_cny
-        print(f"Используем резервный CNY/BYN: {cny_to_byn}")
 
     return usd_to_byn, cny_to_byn
 
@@ -198,8 +189,8 @@ async def get_cny_to_byn_rate():
     _, cny_to_byn = await get_rates_from_nbrb()
     return cny_to_byn
 
-# === EXCEL ===
-def create_excel(tracks, full_name, phone, user_id):
+# === EXCEL: треки пользователя ===
+def create_excel(tracks, full_name, phone, address, user_id):
     wb = Workbook()
     ws = wb.active
     ws.title = "Треки"
@@ -227,7 +218,8 @@ def create_excel(tracks, full_name, phone, user_id):
     ws.cell(row=last+4, column=7, value="ИТОГО (BYN):"); ws.cell(row=last+4, column=8, value=f"{get_total_sum_byn(user_id):.2f}")
     ws.cell(row=last+6, column=1, value=f"ФИО: {full_name}")
     ws.cell(row=last+7, column=1, value=f"Телефон: {phone}")
-    ws.cell(row=last+8, column=1, value=f"ID: {user_id}")
+    ws.cell(row=last+8, column=1, value=f"Адрес: {address}")
+    ws.cell(row=last+9, column=1, value=f"ID: {user_id}")
     for col in range(1, 10):
         ws.column_dimensions[chr(64+col)].width = 18
     out = BytesIO()
@@ -235,7 +227,105 @@ def create_excel(tracks, full_name, phone, user_id):
     out.seek(0)
     return out
 
-# === ХЕНДЛЕРЫ ===
+# === EXCEL: упаковочный лист ===
+def create_packing_list(tracks):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Упаковочный лист"
+    ws.cell(row=1, column=1, value="АРТИКУЛ").font = Font(bold=True)
+    ws.cell(row=1, column=2, value="картинка").font = Font(bold=True)
+    ws.cell(row=1, column=3, value="Наименование").font = Font(bold=True)
+    ws.cell(row=1, column=4, value="Количество").font = Font(bold=True)
+    ws.cell(row=1, column=5, value="цена за единицу в долларах").font = Font(bold=True)
+    ws.cell(row=1, column=6, value="сумма в долларах").font = Font(bold=True)
+    
+    row = 2
+    for t in tracks:
+        ws.cell(row=row, column=1, value="")
+        ws.cell(row=row, column=2, value="")
+        ws.cell(row=row, column=3, value=t["product_name"])
+        ws.cell(row=row, column=4, value=int(t["quantity"]))
+        ws.cell(row=row, column=5, value=float(t.get("price_usd") or 0))
+        ws.cell(row=row, column=6, value=f"=D{row}*E{row}")
+        row += 1
+    
+    ws.cell(row=row, column=5, value="ИТОГО:").font = Font(bold=True)
+    ws.cell(row=row, column=6, value=f"=SUM(F2:F{row-1})").font = Font(bold=True)
+    
+    ws.column_dimensions['A'].width = 15
+    ws.column_dimensions['B'].width = 12
+    ws.column_dimensions['C'].width = 30
+    ws.column_dimensions['D'].width = 12
+    ws.column_dimensions['E'].width = 25
+    ws.column_dimensions['F'].width = 20
+    
+    out = BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out
+
+# === EXCEL: опись ===
+def create_inventory_list(tracks, full_name, phone, address):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Опись"
+    
+    # Сопроводительное письмо
+    ws.cell(row=1, column=1, value="СОПРОВОДИТЕЛЬНОЕ ПИСЬМО").font = Font(bold=True, size=14)
+    ws.merge_cells('A1:E1')
+    ws.cell(row=1, column=1).alignment = Alignment(horizontal="center")
+    
+    ws.cell(row=3, column=1, value=f"Я, {full_name}, к.т. {phone}")
+    ws.merge_cells('A3:E3')
+    
+    ws.cell(row=4, column=1, value="отправляю груз НОМЕР ГРУЗА, весом ВЕС кг., мест: МЕСТ")
+    ws.merge_cells('A4:E4')
+    
+    ws.cell(row=5, column=1, value="из: РФ, МКАД, 19-й километр, вл20с1, Москва")
+    ws.merge_cells('A5:E5')
+    
+    ws.cell(row=6, column=1, value=f"по адресу: {address}")
+    ws.merge_cells('A6:E6')
+    
+    ws.cell(row=7, column=1, value=f"для получателя: {full_name}, к.т. {phone}")
+    ws.merge_cells('A7:E7')
+    
+    ws.cell(row=9, column=1, value="К данному сопроводительному письму прилагаю опись груза, подтверждающую, что все товары в данном грузе являются товарами для личного пользования, не требуют таможенного декларирования, и не являются запрещёнными к ввозу и перевозке на территории Республики Беларусь и территории государств-членов ЕАЭС.")
+    ws.merge_cells('A9:E9')
+    ws.cell(row=9, column=1).alignment = Alignment(wrap_text=True)
+    ws.row_dimensions[9].height = 60
+    
+    # Опись
+    ws.cell(row=11, column=1, value="Опись:").font = Font(bold=True)
+    
+    headers = ["№", "Наименование товара", "Кол-во единиц", "Единицы измерения", "Стоимость в бел. руб"]
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=12, column=col, value=h)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center")
+    
+    row = 13
+    for i, t in enumerate(tracks, 1):
+        ws.cell(row=row, column=1, value=i)
+        ws.cell(row=row, column=2, value=t["product_name"])
+        ws.cell(row=row, column=3, value=int(t["quantity"]))
+        ws.cell(row=row, column=4, value=t["quantity_type"])
+        ws.cell(row=row, column=5, value=float(t.get("price_byn") or 0))
+        row += 1
+    
+    ws.cell(row=row, column=4, value="Итоговая стоимость:").font = Font(bold=True)
+    ws.cell(row=row, column=5, value=f"=SUM(E13:E{row-1})").font = Font(bold=True)
+    
+    ws.column_dimensions['A'].width = 6
+    ws.column_dimensions['B'].width = 35
+    ws.column_dimensions['C'].width = 15
+    ws.column_dimensions['D'].width = 18
+    ws.column_dimensions['E'].width = 20
+    
+    out = BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out# === ХЕНДЛЕРЫ ===
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     if message.chat.type in ["group", "supergroup"]:
@@ -244,7 +334,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     profile = get_user_profile(message.from_user.id)
     keyboard = owner_keyboard if message.from_user.id == OWNER_ID else main_keyboard
     if profile:
-        await message.answer(f"✅ С возвращением!\n\nФИО: {profile[0]}\nТелефон: {profile[1]}", reply_markup=keyboard)
+        await message.answer(f"✅ С возвращением!\n\nФИО: {profile[0]}\nТелефон: {profile[1]}\nАдрес: {profile[2] or 'не указан'}", reply_markup=keyboard)
     else:
         await state.set_state(ProfileForm.waiting_for_fullname)
         await message.answer("Введи твоё ФИО:", reply_markup=cancel_keyboard)
@@ -263,13 +353,23 @@ async def process_phone(message: types.Message, state: FSMContext):
     if message.text == "Отмена":
         await cancel_action(message, state)
         return
+    await state.update_data(phone=message.text.strip())
+    await state.set_state(ProfileForm.waiting_for_address)
+    await message.answer("Введи адрес проживания (для сопроводительных документов):", reply_markup=cancel_keyboard)
+
+@dp.message(ProfileForm.waiting_for_address)
+async def process_address(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await cancel_action(message, state)
+        return
     data = await state.get_data()
     full_name = data.get("fullname")
-    if not full_name:
+    phone = data.get("phone")
+    if not full_name or not phone:
         await message.answer("Ошибка. Начните заново с /start")
         await state.clear()
         return
-    save_user_profile(message.from_user.id, message.from_user.username or "нет", full_name, message.text.strip())
+    save_user_profile(message.from_user.id, message.from_user.username or "нет", full_name, phone, message.text.strip())
     await state.clear()
     keyboard = owner_keyboard if message.from_user.id == OWNER_ID else main_keyboard
     await message.answer("✅ Профиль сохранён! Теперь можно добавлять треки.", reply_markup=keyboard)
@@ -327,12 +427,13 @@ async def process_price_cny(message: types.Message, state: FSMContext):
     price_usd = round(price_byn / usd_to_byn, 2)
     await state.update_data(price_cny=price_cny, price_usd=price_usd, price_byn=price_byn)
     await state.set_state(TrackForm.waiting_for_quantity_type)
-    await message.answer(f"💰 Цена: {price_cny:.2f} CNY = {price_usd:.2f} USD = {price_byn:.2f} BYN\n\nВыбери единицу измерения:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="шт"), KeyboardButton(text="пара")]], resize_keyboard=True))
+    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="шт"), KeyboardButton(text="пара"), KeyboardButton(text="упаковка")]], resize_keyboard=True)
+    await message.answer(f"💰 Цена: {price_cny:.2f} CNY = {price_usd:.2f} USD = {price_byn:.2f} BYN\n\nВыбери единицу измерения:", reply_markup=kb)
 
 @dp.message(TrackForm.waiting_for_quantity_type)
 async def process_quantity_type(message: types.Message, state: FSMContext):
-    if message.text not in ["шт", "пара"]:
-        await message.answer("Выбери кнопку: шт или пара")
+    if message.text not in ["шт", "пара", "упаковка"]:
+        await message.answer("Выбери кнопку: шт, пара или упаковка")
         return
     await state.update_data(qtype=message.text)
     await state.set_state(TrackForm.waiting_for_quantity)
@@ -435,7 +536,7 @@ async def export_excel(message: types.Message):
         await message.answer("Профиль не найден. /start")
         return
     try:
-        excel_file = create_excel(tracks, prof[0], prof[1], message.from_user.id)
+        excel_file = create_excel(tracks, prof[0], prof[1], prof[2] or "", message.from_user.id)
         await message.answer_document(BufferedInputFile(excel_file.getvalue(), filename=f"tracks_{message.from_user.id}.xlsx"), caption="📊 Ваши треки")
     except Exception as e:
         await message.answer(f"Ошибка Excel: {e}")
@@ -463,25 +564,14 @@ async def calc_result(message: types.Message, state: FSMContext):
         await message.answer("Введите число!")
         return
     data = await state.get_data()
-    city = data.get("city")
-    
-    # Все параметры доставки из переменных окружения (можно менять в панели Render)
-    delivery_rate = float(os.getenv("DELIVERY_RATE", "12.0"))           # руб/кг базовая доставка
-    handling_rate = float(os.getenv("HANDLING_RATE", "1.6"))           # руб/кг обработка
-    lida_extra_rate = float(os.getenv("LIDA_EXTRA_RATE", "0.8"))       # руб/кг доплата за Лиду
-    fixed_fee = float(os.getenv("FIXED_FEE", "10.0"))                  # руб фиксированный сбор
-    # Дополнительно: доставка Москва-Минск (по умолчанию 0, но можно изменить)
-    moscow_delivery_rate = float(os.getenv("DELIVERY_MOSCOW_MINSK", "0.0"))
-    
-    # Если вдруг есть старая переменная DELIVERY_MINSK_LIDA, используем её как lida_extra_rate
+    city = data["city"]
+    delivery_rate = float(os.getenv("DELIVERY_RATE", "12.0"))
+    handling_rate = float(os.getenv("HANDLING_RATE", "1.6"))
+    lida_extra_rate = float(os.getenv("LIDA_EXTRA_RATE", "0.8"))
+    fixed_fee = float(os.getenv("FIXED_FEE", "10.0"))
     if os.getenv("DELIVERY_MINSK_LIDA"):
         lida_extra_rate = float(os.getenv("DELIVERY_MINSK_LIDA"))
-    
-    # Расчёт
     cost = weight * delivery_rate + weight * handling_rate + (weight * lida_extra_rate if city == "Лида" else 0) + fixed_fee
-    # Если нужна доставка из Москвы в Минск, можно добавить условие, но сейчас город только Минск и Лида
-    # Для простоты пока оставляем как есть.
-    
     await message.answer(f"🚚 Доставка до {city}: {cost:.2f} руб.", reply_markup=main_keyboard)
     await state.clear()
 
@@ -526,8 +616,6 @@ async def process_currency_amount(message: types.Message, state: FSMContext):
     elif action == "byn2usd":
         usd = amount / usd_to_byn
         await message.answer(f"{amount:.2f} BYN = {usd:.2f} USD")
-    else:
-        await message.answer("Ошибка")
     await state.clear()
 
 @dp.message(F.text == "✅ Завершить и отправить")
@@ -541,19 +629,23 @@ async def finish_and_send(message: types.Message):
     if not prof:
         await message.answer("Профиль не найден.")
         return
-    full_name, phone = prof
-    text = f"📦 ТРЕКИ ПОЛЬЗОВАТЕЛЯ\n👤 {message.from_user.full_name} (@{message.from_user.username or 'нет'})\n📝 {full_name}\n📞 {phone}\n\n"
+    full_name, phone, address = prof[0], prof[1], prof[2] or ""
+    text = f"📦 ТРЕКИ ПОЛЬЗОВАТЕЛЯ\n👤 {message.from_user.full_name} (@{message.from_user.username or 'нет'})\n📝 {full_name}\n📞 {phone}\n🏠 {address}\n\n"
     for i, t in enumerate(tracks, 1):
         dt = datetime.fromisoformat(t['created_at'])
         usd = t.get('price_usd', 0) or 0
         byn = t.get('price_byn', 0) or 0
         text += f"{i}. {t['track_number']} – {t['product_name']}\n   Цена: {t['price_cny']:.2f} CNY ≈ {usd:.2f} USD ≈ {byn:.2f} BYN\n   Кол-во: {t['quantity']} {t['quantity_type']} ({dt.strftime('%Y-%m-%d %H:%M:%S')})\n\n"
     text += f"💰 Итого: {get_total_sum_cny(user_id):.2f} CNY ≈ {get_total_sum_usd(user_id):.2f} USD ≈ {get_total_sum_byn(user_id):.2f} BYN"
-    excel_file = create_excel(tracks, full_name, phone, user_id)
+    excel_file = create_excel(tracks, full_name, phone, address, user_id)
+    packing_file = create_packing_list(tracks)
+    inventory_file = create_inventory_list(tracks, full_name, phone, address)
     try:
         await bot.send_message(OWNER_ID, text)
         await bot.send_document(OWNER_ID, BufferedInputFile(excel_file.getvalue(), filename=f"tracks_{user_id}.xlsx"), caption=f"Excel от {full_name}")
-        await message.answer("✅ Отправлено владельцу!")
+        await bot.send_document(OWNER_ID, BufferedInputFile(packing_file.getvalue(), filename=f"packing_{user_id}.xlsx"), caption=f"📦 Упаковочный лист от {full_name}")
+        await bot.send_document(OWNER_ID, BufferedInputFile(inventory_file.getvalue(), filename=f"inventory_{user_id}.xlsx"), caption=f"📋 Опись от {full_name}")
+        await message.answer("✅ Ваши треки отправлены владельцу!")
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
