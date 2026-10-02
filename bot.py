@@ -11,7 +11,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile
 from supabase import create_client, Client
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, Border, Side
+from openpyxl.styles import Font, Alignment
 import aiohttp
 from aiohttp import web
 
@@ -227,37 +227,39 @@ def create_excel(tracks, full_name, phone, address, user_id):
     out.seek(0)
     return out
 
-# === EXCEL: упаковочный лист ===
+# === EXCEL: упаковочный лист (ИСПРАВЛЕНО) ===
 def create_packing_list(tracks):
     wb = Workbook()
     ws = wb.active
     ws.title = "Упаковочный лист"
-    ws.cell(row=1, column=1, value="АРТИКУЛ").font = Font(bold=True)
-    ws.cell(row=1, column=2, value="картинка").font = Font(bold=True)
-    ws.cell(row=1, column=3, value="Наименование").font = Font(bold=True)
-    ws.cell(row=1, column=4, value="Количество").font = Font(bold=True)
-    ws.cell(row=1, column=5, value="цена за единицу в долларах").font = Font(bold=True)
-    ws.cell(row=1, column=6, value="сумма в долларах").font = Font(bold=True)
     
-    row = 2
+    # Шапка: АРТИКУЛ в A1, картинка в A2, остальное в B2-E2
+    ws.cell(row=1, column=1, value="АРТИКУЛ").font = Font(bold=True)
+    ws.cell(row=2, column=1, value="картинка").font = Font(bold=True)
+    ws.cell(row=2, column=2, value="Наименование").font = Font(bold=True)
+    ws.cell(row=2, column=3, value="Количество").font = Font(bold=True)
+    ws.cell(row=2, column=4, value="цена за единицу в долларах").font = Font(bold=True)
+    ws.cell(row=2, column=5, value="сумма в долларах").font = Font(bold=True)
+    
+    # Данные товаров: начинаем со строки 3, наименование в столбце B
+    row = 3
     for t in tracks:
-        ws.cell(row=row, column=1, value="")
-        ws.cell(row=row, column=2, value="")
-        ws.cell(row=row, column=3, value=t["product_name"])
-        ws.cell(row=row, column=4, value=int(t["quantity"]))
-        ws.cell(row=row, column=5, value=float(t.get("price_usd") or 0))
-        ws.cell(row=row, column=6, value=f"=D{row}*E{row}")
+        ws.cell(row=row, column=1, value="")  # артикул пусто
+        ws.cell(row=row, column=2, value=t["product_name"])  # наименование
+        ws.cell(row=row, column=3, value=int(t["quantity"]))  # количество
+        ws.cell(row=row, column=4, value=float(t.get("price_usd") or 0))  # цена за единицу
+        ws.cell(row=row, column=5, value=f"=C{row}*D{row}")  # сумма = кол-во * цена
         row += 1
     
-    ws.cell(row=row, column=5, value="ИТОГО:").font = Font(bold=True)
-    ws.cell(row=row, column=6, value=f"=SUM(F2:F{row-1})").font = Font(bold=True)
+    # Итоговая сумма в столбце E
+    ws.cell(row=row, column=4, value="ИТОГО:").font = Font(bold=True)
+    ws.cell(row=row, column=5, value=f"=SUM(E3:E{row-1})").font = Font(bold=True)
     
-    ws.column_dimensions['A'].width = 15
-    ws.column_dimensions['B'].width = 12
-    ws.column_dimensions['C'].width = 30
-    ws.column_dimensions['D'].width = 12
-    ws.column_dimensions['E'].width = 25
-    ws.column_dimensions['F'].width = 20
+    ws.column_dimensions['A'].width = 12
+    ws.column_dimensions['B'].width = 35
+    ws.column_dimensions['C'].width = 12
+    ws.column_dimensions['D'].width = 22
+    ws.column_dimensions['E'].width = 18
     
     out = BytesIO()
     wb.save(out)
@@ -270,23 +272,18 @@ def create_inventory_list(tracks, full_name, phone, address):
     ws = wb.active
     ws.title = "Опись"
     
-    # Сопроводительное письмо
     ws.cell(row=1, column=1, value="СОПРОВОДИТЕЛЬНОЕ ПИСЬМО").font = Font(bold=True, size=14)
     ws.merge_cells('A1:E1')
     ws.cell(row=1, column=1).alignment = Alignment(horizontal="center")
     
     ws.cell(row=3, column=1, value=f"Я, {full_name}, к.т. {phone}")
     ws.merge_cells('A3:E3')
-    
     ws.cell(row=4, column=1, value="отправляю груз НОМЕР ГРУЗА, весом ВЕС кг., мест: МЕСТ")
     ws.merge_cells('A4:E4')
-    
     ws.cell(row=5, column=1, value="из: РФ, МКАД, 19-й километр, вл20с1, Москва")
     ws.merge_cells('A5:E5')
-    
     ws.cell(row=6, column=1, value=f"по адресу: {address}")
     ws.merge_cells('A6:E6')
-    
     ws.cell(row=7, column=1, value=f"для получателя: {full_name}, к.т. {phone}")
     ws.merge_cells('A7:E7')
     
@@ -295,7 +292,6 @@ def create_inventory_list(tracks, full_name, phone, address):
     ws.cell(row=9, column=1).alignment = Alignment(wrap_text=True)
     ws.row_dimensions[9].height = 60
     
-    # Опись
     ws.cell(row=11, column=1, value="Опись:").font = Font(bold=True)
     
     headers = ["№", "Наименование товара", "Кол-во единиц", "Единицы измерения", "Стоимость в бел. руб"]
