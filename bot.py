@@ -190,8 +190,7 @@ async def get_usd_to_byn_rate():
 async def get_cny_to_byn_rate():
     _, cny_to_byn = await get_rates_from_nbrb()
     return cny_to_byn
-
-# === EXCEL: ТРЕКИ ===
+    # === EXCEL: ТРЕКИ ===
 def create_excel(tracks, full_name, phone, address, user_id):
     wb = Workbook()
     ws = wb.active
@@ -352,7 +351,7 @@ async def process_phone(message: types.Message, state: FSMContext):
         return
     await state.update_data(phone=message.text.strip())
     await state.set_state(ProfileForm.waiting_for_address)
-    await message.answer("Введи адрес проживания (для сопроводительных документов):", reply_markup=cancel_keyboard)
+    await message.answer("Введи адрес проживания:", reply_markup=cancel_keyboard)
 
 @dp.message(ProfileForm.waiting_for_address)
 async def process_address(message: types.Message, state: FSMContext):
@@ -407,7 +406,7 @@ async def process_product(message: types.Message, state: FSMContext):
         return
     await state.update_data(product=message.text)
     await state.set_state(TrackForm.waiting_for_price_cny)
-    await message.answer("Введи цену в **юанях (CNY)**:\n(бот пересчитает в USD и BYN по курсу Нацбанка)", reply_markup=cancel_keyboard, parse_mode="Markdown")
+    await message.answer("Введи цену в **юанях (CNY)**:", reply_markup=cancel_keyboard, parse_mode="Markdown")
 
 @dp.message(TrackForm.waiting_for_price_cny)
 async def process_price_cny(message: types.Message, state: FSMContext):
@@ -451,8 +450,7 @@ async def process_quantity(message: types.Message, state: FSMContext):
     await state.clear()
     keyboard = owner_keyboard if message.from_user.id == OWNER_ID else main_keyboard
     await message.answer("✅ Трек добавлен!", reply_markup=keyboard)
-
-@dp.message(F.text == "📋 Мои треки")
+    @dp.message(F.text == "📋 Мои треки")
 async def my_tracks(message: types.Message):
     tracks = get_user_tracks(message.from_user.id)
     if not tracks:
@@ -626,4 +624,112 @@ async def finish_and_send(message: types.Message):
     if not prof:
         await message.answer("Профиль не найден.")
         return
-    full_name, phone, address = prof[0], prof[1], prof
+    full_name, phone, address = prof[0], prof[1], prof[2] or ""
+
+    text = (
+        f"📦 Новый заказ от {full_name}\n"
+        f"👤 @{message.from_user.username or 'нет'}\n"
+        f"📞 {phone}\n"
+        f"🏠 {address}\n\n"
+        f"📊 Всего треков: {len(tracks)}\n"
+        f"💰 Итого: {get_total_sum_cny(user_id):.2f} CNY ≈ {get_total_sum_usd(user_id):.2f} USD ≈ {get_total_sum_byn(user_id):.2f} BYN"
+    )
+
+    excel_file = create_excel(tracks, full_name, phone, address, user_id)
+    packing_file = create_packing_list(tracks)
+    inventory_file = create_inventory_list(tracks, full_name, phone, address)
+
+    try:
+        await bot.send_message(OWNER_ID, text)
+        await bot.send_document(OWNER_ID, BufferedInputFile(excel_file.getvalue(), filename=f"tracks_{user_id}.xlsx"), caption=f"Excel от {full_name}")
+        await bot.send_document(OWNER_ID, BufferedInputFile(packing_file.getvalue(), filename=f"packing_{user_id}.xlsx"), caption=f"📦 Упаковочный лист от {full_name}")
+        await bot.send_document(OWNER_ID, BufferedInputFile(inventory_file.getvalue(), filename=f"inventory_{user_id}.xlsx"), caption=f"📋 Опись от {full_name}")
+        await message.answer("✅ Ваши треки отправлены владельцу!")
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
+
+@dp.message(F.text == "📢 Сделать рассылку")
+async def broadcast_start(message: types.Message, state: FSMContext):
+    if message.from_user.id != OWNER_ID:
+        await message.answer("⛔ Только для владельца.")
+        return
+    await state.set_state(BroadcastForm.waiting_for_start_date)
+    await message.answer("Введите начальную дату (ГГГГ-ММ-ДД):", reply_markup=cancel_keyboard)
+
+@dp.message(BroadcastForm.waiting_for_start_date)
+async def broadcast_start_date(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await cancel_action(message, state)
+        return
+    try:
+        start_date = datetime.strptime(message.text.strip(), "%Y-%m-%d")
+        await state.update_data(start_date=start_date)
+        await state.set_state(BroadcastForm.waiting_for_end_date)
+        await message.answer("Введите конечную дату (ГГГГ-ММ-ДД):")
+    except:
+        await message.answer("Неверный формат. Используйте ГГГГ-ММ-ДД")
+
+@dp.message(BroadcastForm.waiting_for_end_date)
+async def broadcast_end_date(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await cancel_action(message, state)
+        return
+    try:
+        end_date = datetime.strptime(message.text.strip(), "%Y-%m-%d")
+        await state.update_data(end_date=end_date)
+        await state.set_state(BroadcastForm.waiting_for_text)
+        await message.answer("Введите текст рассылки:")
+    except:
+        await message.answer("Неверный формат даты.")
+
+@dp.message(BroadcastForm.waiting_for_text)
+async def broadcast_text(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await cancel_action(message, state)
+        return
+    data = await state.get_data()
+    start_date = data["start_date"]
+    end_date = data["end_date"]
+    text = message.text.strip()
+    start_dt = start_date.replace(tzinfo=timezone(timedelta(hours=3)))
+    end_dt = end_date.replace(hour=23, minute=59, second=59, tzinfo=timezone(timedelta(hours=3)))
+    res = supabase.table("tracks").select("user_id").gte("created_at", start_dt.isoformat()).lte("created_at", end_dt.isoformat()).execute()
+    user_ids = list(set(t["user_id"] for t in res.data))
+    if not user_ids:
+        await message.answer("Нет пользователей за этот период.")
+        await state.clear()
+        return
+    await message.answer(f"📢 Найдено {len(user_ids)} пользователей. Рассылаю...")
+    sent = 0
+    for uid in user_ids:
+        try:
+            await bot.send_message(uid, f"📢 {text}")
+            sent += 1
+            await asyncio.sleep(0.05)
+        except:
+            pass
+    await message.answer(f"✅ Отправлено {sent} сообщений.")
+    await state.clear()
+
+# === ВЕБ-СЕРВЕР ===
+async def handle_web(request):
+    return web.Response(text="Bot is running")
+
+async def start_web():
+    app = web.Application()
+    app.router.add_get("/", handle_web)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 8000)
+    await site.start()
+    print("Веб-сервер запущен")
+
+async def run_bot():
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
+
+async def main():
+    await asyncio.gather(start_web(), run_bot())
+
+if __name__ == "__main__":
+    asyncio.run(main())
